@@ -1,5 +1,4 @@
-import type { Condition } from "./watch.ts"
-import { Limits, type Watch } from "./watch.ts"
+import { Limits, type Builtin, type Condition, type Watch } from "./watch.ts"
 
 interface Common {
   readonly id: string
@@ -38,7 +37,7 @@ export function timerWatch(input: Common & { readonly at: number }): Watch {
 }
 
 export function pollWatch(
-  input: Common & {
+  input: Common & Queueing & {
     readonly command: readonly string[]
     readonly condition: Condition
     readonly intervalMs: number
@@ -61,6 +60,7 @@ export function pollWatch(
   if (input.condition.type === "matches") new RegExp(input.condition.pattern)
   return {
     ...base(input),
+    ...queueing(input),
     kind: "poll",
     command: [...input.command],
     cwd: input.cwd,
@@ -68,6 +68,57 @@ export function pollWatch(
     condition: input.condition,
     intervalMs: input.intervalMs,
     timeoutMs,
+    maxFailures,
+    dueAt: input.now,
+    deadlineAt: input.now + deadlineMs,
+  }
+}
+
+interface Queueing {
+  readonly slot?: string
+  readonly holdMs?: number
+}
+
+function queueing(input: Queueing) {
+  if (input.slot === undefined) {
+    if (input.holdMs !== undefined) throw new Error("--hold goes with --slot")
+    return {}
+  }
+  if (!/^[\w.:-]{1,32}$/.test(input.slot)) throw new Error("--slot may use letters, digits, . _ : - (max 32)")
+  const holdMs = input.holdMs ?? Limits.defaultHoldMs
+  if (holdMs < Limits.minIntervalMs || holdMs > Limits.maxHoldMs) throw new Error("--hold must be between 1m and 12h")
+  return { slot: input.slot, holdMs }
+}
+
+/** A watch whose condition the daemon evaluates itself: capacity, session idleness, or other watches ending. */
+export function whenWatch(
+  input: Common & Queueing & { readonly condition: Builtin; readonly intervalMs?: number; readonly deadlineMs?: number; readonly maxFailures?: number },
+): Watch {
+  validateCommon(input)
+  const intervalMs = input.intervalMs ?? Limits.minIntervalMs
+  if (intervalMs < Limits.minIntervalMs) throw new Error("--every must be at least 60s")
+  const deadlineMs = input.deadlineMs ?? Limits.defaultDeadlineMs
+  if (deadlineMs <= 0 || deadlineMs > Limits.maxDeadlineMs) throw new Error("--deadline must be between 0 and 14d")
+  const maxFailures = input.maxFailures ?? Limits.defaultMaxFailures
+  if (!Number.isInteger(maxFailures) || maxFailures < 1 || maxFailures > 100) throw new Error("--failures must be 1–100")
+  const condition = input.condition
+  if (condition.type === "capacity") {
+    if (!(condition.cpu > 0 && condition.cpu <= 100)) throw new Error("--cpu must be 1–100")
+    if (!(Number.isInteger(condition.builds) && condition.builds >= 0)) throw new Error("--builds must be a whole number")
+    if (!(condition.diskGB >= 0)) throw new Error("--disk must be a number of GB")
+  }
+  if (condition.type === "idle") {
+    if (condition.sessions.length === 0) throw new Error("name the sessions to wait for: wake when idle ses_… [ses_…]")
+    for (const session of condition.sessions) if (!/^ses_[A-Za-z0-9]+$/.test(session)) throw new Error(`not a session ID: ${session}`)
+  }
+  if (condition.type === "done" && condition.watches.length === 0) throw new Error("name the watches to wait for: wake when done <id|name>…")
+  if ("stableMs" in condition && (condition.stableMs < 0 || condition.stableMs > 60 * 60_000)) throw new Error("--stable must be at most 1h")
+  return {
+    ...base(input),
+    ...queueing(input),
+    kind: "poll",
+    condition,
+    intervalMs,
     maxFailures,
     dueAt: input.now,
     deadlineAt: input.now + deadlineMs,

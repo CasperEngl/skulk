@@ -106,3 +106,23 @@ export function watchID() {
   const bytes = crypto.getRandomValues(new Uint8Array(8))
   return `wk_${Array.from(bytes, (byte) => chars[byte % 62]).join("")}`
 }
+
+/** The capacity summary; `mac-sim-lease --status` owns the Mac's capacity signals. */
+export const capacityCommand = () => process.env.WAKE_CAPACITY_COMMAND ?? "mac-sim-lease --status"
+
+export const probeCapacity = (watch: Watch) =>
+  runCommand(["/bin/sh", "-c", capacityCommand()], { path: watch.path, timeoutMs: 60_000 })
+
+/**
+ * A session is idle when its last idle time is at or after its last update: OpenCode stamps `time.idle`
+ * when a run finishes and bumps `time.updated` while one is in progress.
+ */
+export async function sessionState(sessionID: string): Promise<"idle" | "busy" | "missing"> {
+  const result = await opencodeApi(["get", `/api/session/${sessionID}`], 30_000)
+  if (result.exitCode !== 0) {
+    if (/SessionNotFoundError|HTTP 404/.test(`${result.stdout} ${result.stderr}`)) return "missing"
+    throw new Error(`could not read session ${sessionID}: ${(result.error ?? result.stderr).trim().slice(0, 200)}`)
+  }
+  const time = (JSON.parse(result.stdout) as { data?: { time?: { updated?: number; idle?: number } } }).data?.time
+  return time?.idle !== undefined && time.idle >= (time.updated ?? 0) ? "idle" : "busy"
+}

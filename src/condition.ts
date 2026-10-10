@@ -41,5 +41,7 @@ export function evaluate(condition: Condition, result: RunResult, baseline: stri
       return value === condition.value ? { type: "met", value } : { type: "pending", value }
     case "matches":
       return new RegExp(condition.pattern).test(value) ? { type: "met", value } : { type: "pending", value }
+    default:
+      return { type: "error", error: `${condition.type} is evaluated by the daemon, not a command` }
   }
 }

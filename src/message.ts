@@ -14,7 +14,7 @@ export function wakeText(watch: Watch, outcome: Outcome, now: number) {
     lines.push(`⏰ Wake: ${watch.name}: timer set ${age} ago for ${formatTime(watch.dueAt)}.`)
     if (late > 5 * 60_000) lines.push(`Fired ${formatDuration(late)} late (the Mac was asleep or off, or wake was stopped).`)
   } else {
-    const command = clip(displayCommand(watch.command ?? []), 200)
+    const command = watch.command ? clip(displayCommand(watch.command), 200) : undefined
     const condition = describeCondition(watch.condition)
     if (outcome === "met") {
       lines.push(`👀 Wake: ${watch.name}: condition met after ${age} (${watch.checks} checks).`)
@@ -33,7 +33,11 @@ export function wakeText(watch: Watch, outcome: Outcome, now: number) {
       )
       if (watch.lastError) lines.push(`Last error: ${clip(watch.lastError)}`)
     }
-    lines.push(`Command: \`${command}\``)
+    lines.push(command === undefined ? `Condition: ${condition}` : `Command: \`${command}\``)
+    if (outcome === "met" && watch.slot)
+      lines.push(
+        `Slot: you hold a place in \`${watch.slot}\` until ${formatTime(watch.holdExpiresAt ?? now)}. Run \`wake release ${watch.id}\` as soon as the heavy work ends; it is also released when this session goes idle.`,
+      )
   }
   lines.push(`${outcome === "met" || outcome === "timer" ? "Next" : "Originally asked"}: ${clip(watch.instruction, 1500)}`)
   lines.push(`Inspect: \`wake show ${watch.id}\` · \`wake logs ${watch.id}\``)

@@ -43,6 +43,9 @@ export class Harness {
   readonly runs: Watch[] = []
   readonly logs: string[] = []
   results: RunResult[] = []
+  /** The capacity summary the probe prints, as `mac-sim-lease --status` would. */
+  capacity = capacityLine(50, 0, 60)
+  readonly sessions = new Map<string, "idle" | "busy" | "missing">()
   store: Store
   engine: Engine
 
@@ -62,6 +65,11 @@ export class Harness {
       deliver: (delivery) => this.server.deliver(delivery),
       newMessageID: messageID,
       log: (id, line) => this.logs.push(`${id} ${line}`),
+      builtin: {
+        capacity: async () => ok(this.capacity),
+        sessionState: async (session) => this.sessions.get(session) ?? "busy",
+        watchStatus: (ref) => this.store.find(ref)?.status,
+      },
     })
   }
 
@@ -84,3 +92,6 @@ export class Harness {
     return this.store.get(id)!
   }
 }
+
+export const capacityLine = (cpu: number | "", builds: number, diskGB: number) =>
+  `cpu ${cpu}% busy (gate 70%) | load 12.3 | memory normal | disk ${diskGB} GB free (floor 15) | sims booted 0 | xcodebuild ${builds} | kit away, 2 leases (idle 900s)`

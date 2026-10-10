@@ -1,10 +1,11 @@
 import { appendFileSync } from "node:fs"
 import { join } from "node:path"
-import { evaluate, type RunResult } from "./condition.ts"
+import { checkBuiltin, type BuiltinDeps } from "./builtin.ts"
+import { evaluate, type Check, type RunResult } from "./condition.ts"
 import { wakeText } from "./message.ts"
 import { logDirectory, type Store } from "./store.ts"
 import { clip } from "./text.ts"
-import { Limits, type Outcome, type Status, type Watch } from "./watch.ts"
+import { isBuiltin, Limits, type Outcome, type Status, type Watch } from "./watch.ts"
 
 export type DeliveryResult = { readonly ok: true } | { readonly ok: false; readonly permanent: boolean; readonly error: string }
 
@@ -23,7 +24,11 @@ export interface EngineDeps {
   readonly newMessageID: (now: number) => string
   readonly log?: (watchID: string, line: string) => void
   readonly maxConcurrent?: number
+  /** Probes for built-in conditions and for releasing slot holds. */
+  readonly builtin?: BuiltinDeps
 }
+
+const sweepIntervalMs = 60_000
 
 export const logPath = (root: string, watchID: string) => join(logDirectory(root), `${watchID}.log`)
 
@@ -45,6 +50,8 @@ export function deliveryBackoff(attempt: number) {
  */
 export class Engine {
   private readonly inFlight = new Set<string>()
+  private sweeping = false
+  private lastSweepAt = 0
 
   constructor(private readonly deps: EngineDeps) {}
 
@@ -64,8 +71,10 @@ export class Engine {
       )
       .sort((a, b) => a.dueAt - b.dueAt)
       .slice(0, Math.max(0, limit - this.inFlight.size))
-    return Promise.all(
-      due.map(async (watch) => {
+    const sweep = this.deps.builtin && !this.sweeping && now - this.lastSweepAt >= sweepIntervalMs ? this.sweepHolds(now) : Promise.resolve()
+    return Promise.all([
+      sweep,
+      ...due.map(async (watch) => {
         this.inFlight.add(watch.id)
         try {
           if (watch.status === "firing") await this.deliver(watch)
@@ -76,7 +85,33 @@ export class Engine {
           this.inFlight.delete(watch.id)
         }
       }),
-    ).then(() => undefined)
+    ]).then(() => undefined)
+  }
+
+  /**
+   * Ends holds that expired, whose watch was cancelled, or whose session has gone idle after its grace
+   * period. An idle session has finished the work the wake started, so its place goes to the next waiter.
+   */
+  async sweepHolds(now = this.deps.now()) {
+    this.sweeping = true
+    this.lastSweepAt = now
+    try {
+      for (const hold of this.deps.store.holds()) {
+        const watch = this.deps.store.get(hold.watchID)
+        const reason =
+          hold.expiresAt <= now
+            ? "expired"
+            : !watch || watch.status === "cancelled"
+              ? "watch cancelled"
+              : watch.deliveredAt !== undefined && now - watch.deliveredAt >= Limits.holdGraceMs &&
+                  (await this.deps.builtin!.sessionState(hold.sessionID).catch(() => "busy" as const)) !== "busy"
+                ? "session idle"
+                : undefined
+        if (reason && this.deps.store.release(hold.watchID)) this.log(hold.watchID, `released slot ${hold.slot}: ${reason}`)
+      }
+    } finally {
+      this.sweeping = false
+    }
   }
 
   /** When the daemon should look again, at the latest. */
@@ -85,16 +120,37 @@ export class Engine {
       .open()
       .filter((watch) => !this.inFlight.has(watch.id))
       .map((watch) => (watch.status === "firing" ? (watch.nextDeliveryAt ?? 0) : Math.min(watch.dueAt, watch.deadlineAt)))
+    if (this.deps.builtin && this.deps.store.holds().length > 0) times.push(this.lastSweepAt + sweepIntervalMs)
     return times.length === 0 ? undefined : Math.min(...times)
   }
 
   private async process(watch: Watch) {
     if (watch.kind === "timer") return this.fire(watch, "timer")
     if (this.deps.now() >= watch.deadlineAt) return this.fire(watch, "expired")
-    const result = await this.deps.run(watch)
+    let check: Check
+    let exitCode: number | undefined
+    let heldSince: number | undefined
+    const condition = watch.condition!
+    if (isBuiltin(condition)) {
+      if (!this.deps.builtin) throw new Error("built-in conditions need probes")
+      const restartAt = watch.slot ? this.deps.store.lastGrantAt(watch.slot) : undefined
+      const result = await checkBuiltin(watch, condition, this.deps.builtin, this.deps.now(), restartAt)
+      check = result.check
+      heldSince = result.heldSince
+    } else {
+      const result = await this.deps.run(watch)
+      check = evaluate(condition, result, watch.baseline)
+      exitCode = result.exitCode ?? undefined
+    }
     const now = this.deps.now()
-    const check = evaluate(watch.condition!, result, watch.baseline)
-    const next: Watch = { ...watch, checks: watch.checks + 1, lastCheckAt: now, lastExit: result.exitCode ?? undefined }
+    const next: Watch = { ...watch, checks: watch.checks + 1, lastCheckAt: now, lastExit: exitCode, heldSince }
+    if (check.type === "met" && watch.slot) {
+      const grant = this.deps.store.acquire(next, now)
+      if (grant.ok) {
+        next.holdExpiresAt = now + (watch.holdMs ?? Limits.defaultHoldMs)
+        this.log(watch.id, `granted slot ${watch.slot} (${grant.held}/${grant.size})`)
+      } else check = { type: "pending", value: `${check.value} · ${grant.reason}` }
+    }
     if (check.type === "error") {
       next.consecutiveFailures = watch.consecutiveFailures + 1
       next.lastError = check.error
@@ -107,7 +163,7 @@ export class Engine {
       next.lastValue = check.value.slice(0, 4000)
       if (check.type === "pending" && check.baseline !== undefined) next.baseline = check.baseline
       const changed = watch.lastValue !== next.lastValue ? "" : " (unchanged)"
-      this.log(watch.id, `check ${next.checks}: exit ${result.exitCode} value ${clip(check.value, 200)}${changed}${check.type === "met" ? " → condition met" : ""}`)
+      this.log(watch.id, `check ${next.checks}: ${exitCode === undefined ? "" : `exit ${exitCode} `}value ${clip(check.value, 200)}${changed}${check.type === "met" ? " → condition met" : ""}`)
       if (check.type === "met") return this.fire(next, "met", watch.status)
     }
     // Coalesce: schedule from now, so a long sleep yields one catch-up check rather than a backlog.
@@ -127,7 +183,10 @@ export class Engine {
       deliveryAttempts: 0,
       nextDeliveryAt: now,
     }
-    if (!this.deps.store.update(firing, expected)) return this.log(watch.id, "watch changed before firing; skipped")
+    if (!this.deps.store.update(firing, expected)) {
+      if (watch.slot) this.deps.store.release(watch.id)
+      return this.log(watch.id, "watch changed before firing; skipped")
+    }
     this.log(watch.id, `${outcome}: queueing wake into ${watch.sessionID} as ${firing.wakeMessageID}`)
     await this.deliver(firing)
   }

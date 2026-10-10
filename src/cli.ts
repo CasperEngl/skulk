@@ -4,13 +4,14 @@ import { join, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { evaluate } from "./condition.ts"
 import { displayCommand } from "./message.ts"
-import { pollWatch, timerWatch } from "./create.ts"
+import { pollWatch, timerWatch, whenWatch } from "./create.ts"
+import { describeCapacity, parseCapacity } from "./builtin.ts"
 import { daemonPID, nudge, runDaemon } from "./daemon.ts"
 import { fileLogger, logPath } from "./engine.ts"
 import { Store } from "./store.ts"
-import { runWatch, sessionExists, watchID } from "./system.ts"
+import { capacityCommand, probeCapacity, runWatch, sessionExists, watchID } from "./system.ts"
 import { clip, formatDuration, formatTime, parseDuration, parseTime, redact, relative } from "./text.ts"
-import { describeCondition, isOpen, Limits, type Condition, type Watch } from "./watch.ts"
+import { describeCondition, isBuiltin, isOpen, Limits, type Builtin, type Condition, type Watch } from "./watch.ts"
 
 const usage = `wake: wake an OpenCode session at a time, or when a polled command's output changes.
 
@@ -32,6 +33,25 @@ Polls (one wake when the condition holds, then the watch ends)
                   --no-check       skip the check that runs once at creation
       A single argument after -- runs through /bin/sh -c; several run as argv. The compared value is
       trimmed stdout. For value conditions a non-zero exit or empty output counts as a failed check.
+
+Built-in conditions (evaluated by the daemon; no command to write)
+  wake when capacity --do <instruction> [--slot heavy] [--cpu 70] [--builds 1] [--disk 20] [--stable 3m]
+      the Mac has room: 3-minute CPU mean ≤ --cpu %, at most --builds xcodebuilds, ≥ --disk GB free,
+      holding steadily for --stable. Read from \`${capacityCommand()}\` (set $WAKE_CAPACITY_COMMAND).
+  wake when idle <ses_…>... --do <instruction> [--stable 2m]
+      every listed OpenCode session has finished its run and stayed idle for --stable
+  wake when done <id|name>... --do <instruction>
+      every listed watch has ended (fired, expired, failed or was cancelled)
+  Built-in watches take --every (default 1m), --deadline, --failures, --name and --session as above.
+
+Slots (one place at a time, first come first served)
+  --slot NAME [--hold 2h]          on \`when\` or \`poll\`: once the condition holds, wait for a place in
+                                   NAME, then wake. Each grant restarts the other waiters' --stable
+                                   window. The place is held until \`wake release\`, the woken session
+                                   goes idle (after a 2m grace), or --hold expires (max 12h).
+  wake release [id|name|slot]      end a hold (default: every hold of this session)
+  wake slots                       sizes, holders and queues
+  wake slot NAME --size N          places in NAME (default: heavy 2, others 1)
 
 Manage
   wake list [--all] [--json]       open watches (--all adds finished ones)
@@ -81,6 +101,13 @@ const { values: flags, positionals } = (() => {
         follow: { type: "boolean", short: "f" },
         n: { type: "string", short: "n" },
         label: { type: "string" },
+        slot: { type: "string" },
+        hold: { type: "string" },
+        cpu: { type: "string" },
+        builds: { type: "string" },
+        disk: { type: "string" },
+        stable: { type: "string" },
+        size: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     })
@@ -124,6 +151,7 @@ function summary(watch: Watch, title: string | undefined) {
     `Created ${watch.id} (${watch.name}): checks every ${formatDuration(watch.intervalMs!)} ${describeCondition(watch.condition)}, then wakes ${target}.`,
     `Deadline ${formatTime(watch.deadlineAt)} (${relative(watch.deadlineAt, Date.now())}).`,
   ]
+  if (watch.slot) lines.push(`Then queues for slot ${watch.slot} (${store.slotSize(watch.slot)} places, ${store.holds(watch.slot).length} held, hold up to ${formatDuration(watch.holdMs!)}).`)
   if (watch.lastValue) lines.push(`Current value: ${clip(watch.lastValue, 200)}`)
   return lines.join("\n")
 }
@@ -189,6 +217,7 @@ async function createPoll() {
       maxFailures: flags.failures ? Number(flags.failures) : undefined,
       cwd: resolve(flags.cwd ?? process.cwd()),
       path: process.env.PATH,
+      ...queueFlags(),
     }),
   )
   if (!flags["no-check"]) {
@@ -208,6 +237,111 @@ async function createPoll() {
     })
   }
   created(watch, target.title)
+}
+
+function queueFlags() {
+  return {
+    slot: flags.slot,
+    holdMs: flags.hold ? parseOr(() => parseDuration(flags.hold!)) : undefined,
+  }
+}
+
+const number = (flag: string | undefined, fallback: number, name: string) => {
+  if (flag === undefined) return fallback
+  const value = Number(flag)
+  if (!Number.isFinite(value)) fail(`--${name} must be a number`)
+  return value
+}
+
+async function createWhen(kind: string | undefined, args: readonly string[]) {
+  const stableMs = (fallback: string) => parseOr(() => parseDuration(flags.stable ?? fallback))
+  let condition: Builtin
+  if (kind === "capacity") {
+    if (args.length) fail("wake when capacity takes no arguments")
+    condition = { type: "capacity", cpu: number(flags.cpu, 70, "cpu"), builds: number(flags.builds, 1, "builds"), diskGB: number(flags.disk, 20, "disk"), stableMs: flags.stable === "0" ? 0 : stableMs("3m") }
+  } else if (kind === "idle") condition = { type: "idle", sessions: [...args], stableMs: flags.stable === "0" ? 0 : stableMs("2m") }
+  else if (kind === "done") {
+    const watches = args.map((ref) => {
+      const watch = resolveWatch(ref)
+      if (!isOpen(watch)) fail(`${watch.id} (${watch.name}) has already ended`)
+      return watch.id
+    })
+    condition = { type: "done", watches }
+  } else fail("wake when capacity|idle|done …")
+  const target = await targetSession()
+  const now = Date.now()
+  const watch = parseOr(() =>
+    whenWatch({
+      id: watchID(),
+      name: flags.name,
+      sessionID: target.sessionID,
+      instruction: flags.do ?? "",
+      now,
+      createdBy: process.env.OPENCODE_SESSION_ID,
+      condition,
+      intervalMs: flags.every ? parseDuration(flags.every) : undefined,
+      deadlineMs: flags.deadline ? parseDuration(flags.deadline) : undefined,
+      maxFailures: flags.failures ? Number(flags.failures) : undefined,
+      ...queueFlags(),
+    }),
+  )
+  watch.path = process.env.PATH
+  if (condition.type === "capacity") {
+    const result = await probeCapacity(watch)
+    const capacity = result.exitCode === 0 ? parseCapacity(result.stdout) : undefined
+    if (!capacity) fail(`could not read capacity from \`${capacityCommand()}\` (${clip((result.error ?? result.stderr) || result.stdout, 200)})`)
+    watch.lastValue = describeCapacity(capacity)
+  }
+  if (condition.type === "idle")
+    for (const session of condition.sessions) {
+      const found = await sessionExists(session).catch((error: Error) => fail(error.message))
+      if (!found.exists) fail(`session ${session} does not exist`)
+    }
+  created(watch, target.title)
+}
+
+function release(ref: string | undefined) {
+  const session = process.env.OPENCODE_SESSION_ID
+  const watch = ref ? store.find(ref) : undefined
+  const holds = watch
+    ? store.holds().filter((hold) => hold.watchID === watch.id)
+    : store.holds(ref).filter((hold) => !session || hold.sessionID === session)
+  if (!watch && !session && ref === undefined) fail("which hold? give a watch ID or name (or run inside OpenCode)")
+  if (holds.length === 0) return console.log(ref ? `No hold for ${ref}${!watch && session ? " in this session" : ""}.` : "This session holds no slots.")
+  for (const hold of holds) {
+    if (store.release(hold.watchID)) {
+      fileLogger(store.root)(hold.watchID, `released slot ${hold.slot}: wake release`)
+      console.log(`Released ${hold.slot} (${hold.watchID}).`)
+    }
+  }
+  nudge(store.root)
+}
+
+function slots() {
+  const now = Date.now()
+  const waiting = store.open().filter((watch) => watch.slot && watch.status === "active")
+  const names = [...new Set([...store.holds().map((hold) => hold.slot), ...waiting.map((watch) => watch.slot!), "heavy"])].sort()
+  if (flags.json)
+    return console.log(JSON.stringify(names.map((slot) => ({ slot, size: store.slotSize(slot), holds: store.holds(slot), queue: waiting.filter((watch) => watch.slot === slot).map((watch) => watch.id) })), null, 2))
+  for (const slot of names) {
+    const holds = store.holds(slot)
+    console.log(`${slot}: ${holds.length}/${store.slotSize(slot)} held`)
+    for (const hold of holds) {
+      const watch = store.get(hold.watchID)
+      console.log(`  held   ${hold.watchID} (${watch?.name ?? "?"}) by ${hold.sessionID} since ${relative(hold.acquiredAt, now)}, until ${formatTime(hold.expiresAt)}`)
+    }
+    for (const watch of waiting.filter((other) => other.slot === slot).sort((a, b) => a.createdAt - b.createdAt))
+      console.log(`  queued ${watch.id} (${watch.name}) for ${watch.sessionID}: ${clip(watch.lastValue ?? "not checked yet", 80)}`)
+  }
+}
+
+function resizeSlot(slot: string | undefined) {
+  if (!slot || !/^[\w.:-]{1,32}$/.test(slot)) fail("wake slot NAME --size N")
+  const size = Number(flags.size)
+  if (!Number.isInteger(size) || size < 1 || size > 16) fail("--size must be 1–16")
+  store.setSlotSize(slot, size)
+  console.log(`Slot ${slot} now has ${size} place${size === 1 ? "" : "s"}.`)
+  nudge(store.root)
 }
 
 function row(watch: Watch, now: number) {
@@ -249,7 +383,7 @@ function show(watch: Watch) {
   if (watch.kind === "timer") lines.push(["Fires", at(watch.dueAt)])
   else
     lines.push(
-      ["Command", redact(displayCommand(watch.command!))],
+      ["Command", watch.command ? redact(displayCommand(watch.command)) : undefined],
       ["Directory", watch.cwd],
       ["Condition", `${describeCondition(watch.condition)}, every ${formatDuration(watch.intervalMs!)}`],
       ["Deadline", at(watch.deadlineAt)],
@@ -259,6 +393,7 @@ function show(watch: Watch) {
       ["Baseline", watch.baseline === undefined ? undefined : clip(watch.baseline, 200)],
       ["Checks", `${watch.checks} (${watch.consecutiveFailures} consecutive failures, limit ${watch.maxFailures})`],
       ["Last error", watch.lastError === undefined ? undefined : clip(watch.lastError, 500)],
+      ["Slot", watch.slot ? `${watch.slot}${store.holds().some((hold) => hold.watchID === watch.id) ? `, held until ${at(watch.holdExpiresAt)}` : watch.status === "active" ? ", queued" : ""}` : undefined],
     )
   if (watch.firedAt !== undefined)
     lines.push(
@@ -283,6 +418,7 @@ function cancel(refs: readonly string[]) {
     const now = Date.now()
     if (!store.update({ ...watch, status: "cancelled", endedAt: now }, watch.status)) fail(`${watch.id} changed meanwhile; try again`)
     fileLogger(store.root)(watch.id, "cancelled")
+    if (store.release(watch.id)) fileLogger(store.root)(watch.id, "released its slot")
     console.log(`Cancelled ${watch.id} (${watch.name}).`)
   }
   nudge(store.root)
@@ -359,6 +495,18 @@ switch (verb) {
     break
   case "poll":
     await createPoll()
+    break
+  case "when":
+    await createWhen(rest[0], rest.slice(1))
+    break
+  case "release":
+    release(rest[0])
+    break
+  case "slots":
+    slots()
+    break
+  case "slot":
+    resizeSlot(rest[0])
     break
   case "list":
   case "ls":

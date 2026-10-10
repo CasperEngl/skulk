@@ -40,6 +40,35 @@ For value conditions, a non-zero exit, empty output, or timeout is a failed chec
 
 `wake poll` runs the command once at creation. It refuses to create the watch if that check fails or if the condition already holds (`--no-check` skips this), and shows the current value.
 
+## Built-in conditions and slots
+
+Some waits are common enough that the daemon evaluates them itself, so nobody writes a probe script:
+
+```sh
+# Run heavy work when the Mac has room, one job at a time
+wake when capacity --slot heavy --name perf-proofs \
+  --do "Capacity granted: run the native and CLI proofs, then wake release."
+
+# Continue when other sessions finish, or when other watches end
+wake when idle ses_perf ses_arch --do "Both agents are done: review and push their branches."
+wake when done perf-proofs --do "Proofs finished; summarize."
+```
+
+| Condition | Holds when |
+| --- | --- |
+| `capacity` | 3-minute CPU mean ≤ `--cpu` (70), at most `--builds` (1) xcodebuilds, ≥ `--disk` (20) GB free, continuously for `--stable` (3m). Read from `mac-sim-lease --status`, which owns the Mac's capacity signals; override with `$WAKE_CAPACITY_COMMAND`. |
+| `idle ses_…` | every listed OpenCode session has finished its run (`time.idle ≥ time.updated`) and stayed idle for `--stable` (2m) |
+| `done <watch>…` | every listed watch has ended: fired, expired, failed or cancelled |
+
+An unreadable probe or a missing session is a failed check, never a pass.
+
+**Slots** stop several waiters from piling onto the same opening. With `--slot NAME` (on `when` or `poll`), a watch whose condition holds waits for a place in `NAME` before it wakes its session:
+
+- First come, first served: only the oldest waiter in a slot can be granted.
+- Each grant restarts the other waiters' `--stable` window, so the next grant sees the CPU after the first job has started.
+- A place is held until `wake release <watch>` (or `wake release` for every hold of the calling session), the woken session goes idle after a 2-minute grace period, or `--hold` expires (default 2h, max 12h).
+- `heavy` has two places, matching the mac-capacity rule of two heavy jobs; other slots have one. `wake slot NAME --size N` changes that, and `wake slots` shows holders and queues.
+
 ## Guarantees and guardrails
 
 - **One wake, then done.** Met, expired and failed watches each send one message and stop.
