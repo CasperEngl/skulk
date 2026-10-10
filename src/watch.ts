@@ -3,14 +3,46 @@ export type Condition =
   | { readonly type: "equals"; readonly value: string }
   | { readonly type: "matches"; readonly pattern: string }
   | { readonly type: "succeeds" }
+  | { readonly type: "exits" }
   // Built-in conditions are evaluated by the daemon itself; they have no user command.
   | { readonly type: "capacity"; readonly cpu: number; readonly builds: number; readonly diskGB: number; readonly stableMs: number }
   | { readonly type: "idle"; readonly sessions: readonly string[]; readonly stableMs: number }
   | { readonly type: "done"; readonly watches: readonly string[] }
+  | {
+      readonly type: "gh-run"
+      readonly repo: string
+      readonly runID?: string
+      readonly workflow?: string
+      readonly sha?: string
+      readonly pr?: number
+    }
+  | {
+      readonly type: "pr-checks"
+      readonly repo: string
+      readonly pr: number
+      readonly required?: boolean
+    }
+  | {
+      readonly type: "npm"
+      readonly pkg: string
+      readonly tag?: string
+      readonly mode: "changes" | "newer-than" | "published-after"
+      readonly from?: string
+      readonly newerThan?: string
+      readonly publishedAfter?: number
+    }
 
-export type Builtin = Extract<Condition, { readonly type: "capacity" | "idle" | "done" }>
+export type Builtin = Extract<Condition, { readonly type: "capacity" | "idle" | "done" | "gh-run" | "pr-checks" | "npm" }>
 export const isBuiltin = (condition: Condition | undefined): condition is Builtin =>
-  condition?.type === "capacity" || condition?.type === "idle" || condition?.type === "done"
+  condition?.type === "capacity" ||
+  condition?.type === "idle" ||
+  condition?.type === "done" ||
+  condition?.type === "gh-run" ||
+  condition?.type === "pr-checks" ||
+  condition?.type === "npm"
+
+export const isEventBuiltin = (condition: Condition | undefined) =>
+  condition?.type === "gh-run" || condition?.type === "pr-checks" || condition?.type === "npm"
 
 export type Status = "active" | "firing" | "done" | "expired" | "failed" | "cancelled" | "undeliverable"
 export type Outcome = "met" | "timer" | "expired" | "failed"
@@ -63,6 +95,8 @@ export interface Watch {
 
 export const Limits = {
   minIntervalMs: 60_000,
+  eventIntervalMs: 15_000,
+  minEventIntervalMs: 5_000,
   defaultDeadlineMs: 48 * 3600_000,
   maxDeadlineMs: 14 * 24 * 3600_000,
   maxActive: 20,
@@ -93,11 +127,29 @@ export const describeCondition = (condition: Condition | undefined) => {
       return `until output matches /${condition.pattern}/`
     case "succeeds":
       return "until the command exits 0"
+    case "exits":
+      return "until the command exits"
     case "capacity":
       return `until the Mac has capacity (CPU ≤${condition.cpu}%, ≤${condition.builds} xcodebuild, ≥${condition.diskGB} GB free, steady ${Math.round(condition.stableMs / 60_000)}m)`
     case "idle":
       return `until ${condition.sessions.join(", ")} ${condition.sessions.length === 1 ? "is" : "are"} idle`
     case "done":
       return `until ${condition.watches.join(", ")} ${condition.watches.length === 1 ? "has" : "have"} ended`
+    case "gh-run": {
+      const target = condition.runID
+        ? `run ${condition.runID}`
+        : condition.pr !== undefined
+          ? `PR #${condition.pr}${condition.workflow ? ` (${condition.workflow})` : ""}`
+          : `${condition.workflow ? `${condition.workflow} ` : ""}@ ${condition.sha?.slice(0, 10)}`
+      return `until GitHub Actions ${condition.repo} ${target} completes`
+    }
+    case "pr-checks":
+      return `until ${condition.required ? "required " : ""}PR checks on ${condition.repo}#${condition.pr} finish`
+    case "npm":
+      return condition.mode === "changes"
+        ? `until npm ${condition.pkg}@${condition.tag ?? "latest"} changes${condition.from ? ` from ${condition.from}` : ""}`
+        : condition.mode === "newer-than"
+          ? `until npm ${condition.pkg}${condition.tag ? `@${condition.tag}` : ""} is newer than ${condition.newerThan}`
+          : `until npm ${condition.pkg}${condition.tag ? `@${condition.tag}` : ""} is published after ${new Date(condition.publishedAfter!).toISOString()}`
   }
 }

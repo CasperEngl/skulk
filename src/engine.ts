@@ -1,7 +1,7 @@
 import { appendFileSync } from "node:fs"
 import { join } from "node:path"
 import { checkBuiltin, type BuiltinDeps } from "./builtin.ts"
-import { evaluate, type Check, type RunResult } from "./condition.ts"
+import { evaluate, outputTail, type Check, type RunResult } from "./condition.ts"
 import { wakeText } from "./message.ts"
 import { logDirectory, type Store } from "./store.ts"
 import { clip } from "./text.ts"
@@ -130,6 +130,7 @@ export class Engine {
     let check: Check
     let exitCode: number | undefined
     let heldSince: number | undefined
+    let nextIntervalMs: number | undefined
     const condition = watch.condition!
     if (isBuiltin(condition)) {
       if (!this.deps.builtin) throw new Error("built-in conditions need probes")
@@ -137,8 +138,18 @@ export class Engine {
       const result = await checkBuiltin(watch, condition, this.deps.builtin, this.deps.now(), restartAt)
       check = result.check
       heldSince = result.heldSince
+      nextIntervalMs = result.nextIntervalMs
     } else {
-      const result = await this.deps.run(watch)
+      const start = this.deps.now()
+      const bounded =
+        condition.type === "exits"
+          ? { ...watch, timeoutMs: Math.max(1, Math.min(watch.timeoutMs ?? watch.deadlineAt - start, watch.deadlineAt - start)) }
+          : watch
+      const result = await this.deps.run(bounded)
+      if (condition.type === "exits" && result.timedOut && this.deps.now() >= watch.deadlineAt) {
+        const latest = outputTail(result)
+        return this.fire(latest ? { ...watch, lastValue: latest.slice(0, 4000) } : watch, "expired", watch.status)
+      }
       check = evaluate(condition, result, watch.baseline)
       exitCode = result.exitCode ?? undefined
     }
@@ -154,6 +165,7 @@ export class Engine {
     if (check.type === "error") {
       next.consecutiveFailures = watch.consecutiveFailures + 1
       next.lastError = check.error
+      if (check.value) next.lastValue = check.value.slice(0, 4000)
       this.log(watch.id, `check ${next.checks}: error (${next.consecutiveFailures}/${watch.maxFailures}): ${clip(check.error)}`)
       if (next.consecutiveFailures >= (watch.maxFailures ?? Limits.defaultMaxFailures)) return this.fire(next, "failed", watch.status)
     } else {
@@ -167,7 +179,7 @@ export class Engine {
       if (check.type === "met") return this.fire(next, "met", watch.status)
     }
     // Coalesce: schedule from now, so a long sleep yields one catch-up check rather than a backlog.
-    next.dueAt = now + (watch.intervalMs ?? Limits.minIntervalMs)
+    next.dueAt = now + (nextIntervalMs ?? watch.intervalMs ?? Limits.minIntervalMs)
     if (!this.deps.store.update(next, "active")) this.log(watch.id, "watch changed during check (cancelled?); result discarded")
   }
 

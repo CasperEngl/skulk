@@ -21,6 +21,10 @@ export function wakeText(watch: Watch, outcome: Outcome, now: number) {
       if (watch.condition?.type === "succeeds") {
         lines.push("The command now exits 0.")
         if (watch.lastValue) lines.push(`Output: ${clip(watch.lastValue)}`)
+      } else if (watch.condition?.type === "exits") {
+        lines.push(`The command exited with code ${watch.lastExit ?? 0}.`)
+        const tail = (watch.lastValue ?? "").replace(/^exit -?\d+(?::\s*)?/, "")
+        if (tail) lines.push(`Output tail: ${clip(tail)}`)
       } else if (watch.previousValue !== undefined && watch.previousValue !== watch.lastValue)
         lines.push(`Changed: ${clip(watch.previousValue)} → ${clip(watch.lastValue ?? "")}`)
       else lines.push(`Value: ${clip(watch.lastValue ?? "")}`)

@@ -16,6 +16,14 @@ export type Check =
 /** The compared value: trimmed stdout. */
 export const valueOf = (result: RunResult) => result.stdout.trim()
 
+/** Trailing lines of combined stdout/stderr for a blocking command that exited. */
+export function outputTail(result: RunResult, maxLines = 10, maxChars = 500) {
+  const combined = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n")
+  if (!combined) return ""
+  const lines = combined.split("\n").slice(-maxLines).join("\n")
+  return lines.length <= maxChars ? lines : `…${lines.slice(-maxChars)}`
+}
+
 /**
  * Classify one command run. A run is an error when the command could not run or timed out. For value
  * conditions it is also an error when the command exits non-zero or prints nothing, so a broken or
@@ -24,7 +32,11 @@ export const valueOf = (result: RunResult) => result.stdout.trim()
 export function evaluate(condition: Condition, result: RunResult, baseline: string | undefined): Check {
   const value = valueOf(result)
   if (result.error !== undefined) return { type: "error", error: result.error }
-  if (result.timedOut) return { type: "error", error: "timed out", value }
+  if (result.timedOut) return { type: "error", error: "timed out", value: outputTail(result) || value }
+  if (condition.type === "exits") {
+    const tail = outputTail(result)
+    return { type: "met", value: `exit ${result.exitCode ?? 0}${tail ? `: ${tail}` : ""}` }
+  }
   if (condition.type === "succeeds") return result.exitCode === 0 ? { type: "met", value } : { type: "pending", value }
   if (result.exitCode !== 0) {
     const detail = result.stderr.trim().split("\n").at(-1) ?? ""

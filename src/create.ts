@@ -1,4 +1,4 @@
-import { Limits, type Builtin, type Condition, type Watch } from "./watch.ts"
+import { isEventBuiltin, Limits, type Builtin, type Condition, type Watch } from "./watch.ts"
 
 interface Common {
   readonly id: string
@@ -90,18 +90,20 @@ function queueing(input: Queueing) {
   return { slot: input.slot, holdMs }
 }
 
-/** A watch whose condition the daemon evaluates itself: capacity, session idleness, or other watches ending. */
+/** A watch whose condition the daemon evaluates itself: capacity, session idleness, watches ending, GitHub runs/checks, or npm. */
 export function whenWatch(
   input: Common & Queueing & { readonly condition: Builtin; readonly intervalMs?: number; readonly deadlineMs?: number; readonly maxFailures?: number },
 ): Watch {
   validateCommon(input)
-  const intervalMs = input.intervalMs ?? Limits.minIntervalMs
-  if (intervalMs < Limits.minIntervalMs) throw new Error("--every must be at least 60s")
+  const condition = input.condition
+  const event = isEventBuiltin(condition)
+  const minInterval = event ? Limits.minEventIntervalMs : Limits.minIntervalMs
+  const intervalMs = input.intervalMs ?? (event ? Limits.eventIntervalMs : Limits.minIntervalMs)
+  if (intervalMs < minInterval) throw new Error(`--every must be at least ${Math.round(minInterval / 1000)}s`)
   const deadlineMs = input.deadlineMs ?? Limits.defaultDeadlineMs
   if (deadlineMs <= 0 || deadlineMs > Limits.maxDeadlineMs) throw new Error("--deadline must be between 0 and 14d")
   const maxFailures = input.maxFailures ?? Limits.defaultMaxFailures
   if (!Number.isInteger(maxFailures) || maxFailures < 1 || maxFailures > 100) throw new Error("--failures must be 1–100")
-  const condition = input.condition
   if (condition.type === "capacity") {
     if (!(condition.cpu > 0 && condition.cpu <= 100)) throw new Error("--cpu must be 1–100")
     if (!(Number.isInteger(condition.builds) && condition.builds >= 0)) throw new Error("--builds must be a whole number")
@@ -112,6 +114,29 @@ export function whenWatch(
     for (const session of condition.sessions) if (!/^ses_[A-Za-z0-9]+$/.test(session)) throw new Error(`not a session ID: ${session}`)
   }
   if (condition.type === "done" && condition.watches.length === 0) throw new Error("name the watches to wait for: wake when done <id|name>…")
+  if (condition.type === "gh-run") {
+    if (!/^[\w.-]+\/[\w.-]+$/.test(condition.repo)) throw new Error("--repo must be OWNER/REPO")
+    const modes = [condition.runID !== undefined, condition.sha !== undefined, condition.pr !== undefined].filter(Boolean).length
+    if (modes !== 1) throw new Error("give one of --run ID, --workflow FILE --sha SHA, or --pr N [--workflow FILE]")
+    if (condition.runID !== undefined && (!/^\d+$/.test(condition.runID) || condition.workflow !== undefined))
+      throw new Error("--run must be a numeric run ID (without --workflow)")
+    if (condition.sha !== undefined) {
+      if (!condition.workflow?.trim()) throw new Error("--sha requires --workflow FILE")
+      if (!/^[0-9a-fA-F]{7,40}$/.test(condition.sha)) throw new Error("--sha must be a 7–40 character commit SHA")
+    }
+    if (condition.pr !== undefined && (!Number.isInteger(condition.pr) || condition.pr < 1))
+      throw new Error("--pr must be a positive PR number")
+  }
+  if (condition.type === "pr-checks") {
+    if (!/^[\w.-]+\/[\w.-]+$/.test(condition.repo)) throw new Error("--repo must be OWNER/REPO")
+    if (!Number.isInteger(condition.pr) || condition.pr < 1) throw new Error("--pr must be a positive PR number")
+  }
+  if (condition.type === "npm") {
+    if (!/^(?:@[\w.-]+\/)?[\w.-]+$/.test(condition.pkg)) throw new Error("--package must be an npm package name")
+    if (condition.mode === "newer-than" && !condition.newerThan?.trim()) throw new Error("--newer-than requires a version")
+    if (condition.mode === "published-after" && (condition.publishedAfter === undefined || Number.isNaN(condition.publishedAfter)))
+      throw new Error("--published-after requires a valid time")
+  }
   if ("stableMs" in condition && (condition.stableMs < 0 || condition.stableMs > 60 * 60_000)) throw new Error("--stable must be at most 1h")
   return {
     ...base(input),
@@ -119,6 +144,41 @@ export function whenWatch(
     kind: "poll",
     condition,
     intervalMs,
+    maxFailures,
+    dueAt: input.now,
+    deadlineAt: input.now + deadlineMs,
+  }
+}
+
+/** A watch that runs a blocking command once and wakes when it exits (re-running on daemon restart). */
+export function exitsWatch(
+  input: Common & Queueing & {
+    readonly command: readonly string[]
+    readonly deadlineMs?: number
+    readonly timeoutMs?: number
+    readonly maxFailures?: number
+    readonly cwd?: string
+    readonly path?: string
+  },
+): Watch {
+  validateCommon(input)
+  if (input.command.length === 0) throw new Error("give the blocking command after --")
+  const deadlineMs = input.deadlineMs ?? Limits.defaultDeadlineMs
+  if (deadlineMs <= 0 || deadlineMs > Limits.maxDeadlineMs) throw new Error("--deadline must be between 0 and 14d")
+  const timeoutMs = input.timeoutMs ?? deadlineMs
+  if (timeoutMs <= 0 || timeoutMs > Limits.maxDeadlineMs) throw new Error("--timeout must be between 0 and 14d")
+  const maxFailures = input.maxFailures ?? 1
+  if (!Number.isInteger(maxFailures) || maxFailures < 1 || maxFailures > 100) throw new Error("--failures must be 1–100")
+  return {
+    ...base(input),
+    ...queueing(input),
+    kind: "poll",
+    command: [...input.command],
+    cwd: input.cwd,
+    path: input.path,
+    condition: { type: "exits" },
+    intervalMs: Limits.eventIntervalMs,
+    timeoutMs: Math.min(timeoutMs, deadlineMs),
     maxFailures,
     dueAt: input.now,
     deadlineAt: input.now + deadlineMs,

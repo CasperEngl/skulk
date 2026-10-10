@@ -4,21 +4,42 @@ import { join, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { evaluate } from "./condition.ts"
 import { displayCommand } from "./message.ts"
-import { pollWatch, timerWatch, whenWatch } from "./create.ts"
-import { describeCapacity, parseCapacity } from "./builtin.ts"
+import { exitsWatch, pollWatch, timerWatch, whenWatch } from "./create.ts"
+import { checkBuiltin, describeCapacity, parseCapacity } from "./builtin.ts"
 import { daemonPID, nudge, runDaemon } from "./daemon.ts"
 import { fileLogger, logPath } from "./engine.ts"
 import { Store } from "./store.ts"
-import { capacityCommand, probeCapacity, runWatch, sessionExists, watchID } from "./system.ts"
+import { capacityCommand, defaultPath, probeCapacity, runProbe, runWatch, sessionExists, sessionState, watchID } from "./system.ts"
 import { clip, formatDuration, formatTime, parseDuration, parseTime, redact, relative } from "./text.ts"
-import { describeCondition, isBuiltin, isOpen, Limits, type Builtin, type Condition, type Watch } from "./watch.ts"
+import { describeCondition, isEventBuiltin, isOpen, Limits, type Builtin, type Condition, type Watch } from "./watch.ts"
 
-const usage = `wake: wake an OpenCode session at a time, or when a polled command's output changes.
+const usage = `wake: wake an OpenCode session at a time, or when an external event or polled condition holds.
 
 Timers
   wake in <duration> --do <instruction> [--name N] [--session S]
   wake at <time>     --do <instruction> [--name N] [--session S]
       duration: 90s, 20m, 2h30m, 1d     time: 15:30, 3pm, tomorrow 9:00, 2026-10-10 09:00
+
+Built-in conditions (evaluated by the daemon; no probe script to write)
+  wake when gh-run --repo OWNER/REPO (--run ID | --workflow FILE --sha SHA | --pr N [--workflow FILE]) --do <instruction>
+      waits for the GitHub Actions run to appear and complete (adaptive 10–15s checks); reports
+      the conclusion, failed job names and run URL
+  wake when pr-checks --repo OWNER/REPO --pr N [--required] --do <instruction>
+      waits for PR checks to finish (default every 15s); reports pass and fail check names
+  wake when npm --package NAME (--tag TAG --changes [--from V] | --newer-than VERSION | --published-after TIME) --do <instruction>
+      waits for an npm version to publish (default every 15s); reports version and publish time
+  wake when exits --do <instruction> [--timeout D] [--deadline D] -- <blocking command...>
+      runs a blocking command (e.g. \`gh run watch <id> --exit-status\`), re-runs across daemon
+      restarts, and wakes when it exits with the exit code and output tail
+  wake when capacity --do <instruction> [--slot heavy] [--cpu 70] [--builds 1] [--disk 20] [--stable 3m]
+      the Mac has room: 3-minute CPU mean ≤ --cpu %, at most --builds xcodebuilds, ≥ --disk GB free,
+      holding steadily for --stable. Read from \`${capacityCommand()}\` (set $WAKE_CAPACITY_COMMAND).
+  wake when idle <ses_…>... --do <instruction> [--stable 2m]
+      every listed OpenCode session has finished its run and stayed idle for --stable
+  wake when done <id|name>... --do <instruction>
+      every listed watch has ended (fired, expired, failed or was cancelled)
+  Built-in watches take --every (default 15s for gh-run/pr-checks/npm, 1m for capacity/idle/done),
+  --deadline, --failures, --no-check, --name and --session.
 
 Polls (one wake when the condition holds, then the watch ends)
   wake poll --every <duration> <condition> --do <instruction> [options] -- <command...>
@@ -33,16 +54,6 @@ Polls (one wake when the condition holds, then the watch ends)
                   --no-check       skip the check that runs once at creation
       A single argument after -- runs through /bin/sh -c; several run as argv. The compared value is
       trimmed stdout. For value conditions a non-zero exit or empty output counts as a failed check.
-
-Built-in conditions (evaluated by the daemon; no command to write)
-  wake when capacity --do <instruction> [--slot heavy] [--cpu 70] [--builds 1] [--disk 20] [--stable 3m]
-      the Mac has room: 3-minute CPU mean ≤ --cpu %, at most --builds xcodebuilds, ≥ --disk GB free,
-      holding steadily for --stable. Read from \`${capacityCommand()}\` (set $WAKE_CAPACITY_COMMAND).
-  wake when idle <ses_…>... --do <instruction> [--stable 2m]
-      every listed OpenCode session has finished its run and stayed idle for --stable
-  wake when done <id|name>... --do <instruction>
-      every listed watch has ended (fired, expired, failed or was cancelled)
-  Built-in watches take --every (default 1m), --deadline, --failures, --name and --session as above.
 
 Slots (one place at a time, first come first served)
   --slot NAME [--hold 2h]          on \`when\` or \`poll\`: once the condition holds, wait for a place in
@@ -62,9 +73,9 @@ Manage
   wake daemon                      run the supervisor (launchd runs this)
   wake launchd [--label L]         print the LaunchAgent plist (honours $WAKE_HOME)
 
-The target session defaults to $OPENCODE_SESSION_ID (the calling OpenCode session). Limits: checks at
-most every 60s, ${Limits.maxActive} open watches, deadlines up to 14 days. State and logs live in
-${"$"}WAKE_HOME (default ~/.local/state/wake), owner-only.`
+The target session defaults to $OPENCODE_SESSION_ID (the calling OpenCode session). Limits: polls at
+most every 60s (15s default for event built-ins), ${Limits.maxActive} open watches, deadlines up to 14 days. State
+and logs live in ${"$"}WAKE_HOME (default ~/.local/state/wake), owner-only.`
 
 function fail(message: string): never {
   console.error(`wake: ${message}`)
@@ -108,6 +119,16 @@ const { values: flags, positionals } = (() => {
         disk: { type: "string" },
         stable: { type: "string" },
         size: { type: "string" },
+        repo: { type: "string", short: "R" },
+        run: { type: "string" },
+        workflow: { type: "string", short: "w" },
+        sha: { type: "string" },
+        pr: { type: "string" },
+        required: { type: "boolean" },
+        package: { type: "string" },
+        tag: { type: "string" },
+        "newer-than": { type: "string" },
+        "published-after": { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     })
@@ -147,8 +168,12 @@ function summary(watch: Watch, title: string | undefined) {
   const target = `${watch.sessionID}${title ? ` (${title})` : ""}`
   if (watch.kind === "timer")
     return `Created ${watch.id} (${watch.name}): wakes ${target} at ${formatTime(watch.dueAt)} (${relative(watch.dueAt, Date.now())}).`
+  const action =
+    watch.condition?.type === "exits"
+      ? `runs \`${clip(displayCommand(watch.command ?? []), 120)}\` ${describeCondition(watch.condition)}`
+      : `checks every ${formatDuration(watch.intervalMs!)} ${describeCondition(watch.condition)}`
   const lines = [
-    `Created ${watch.id} (${watch.name}): checks every ${formatDuration(watch.intervalMs!)} ${describeCondition(watch.condition)}, then wakes ${target}.`,
+    `Created ${watch.id} (${watch.name}): ${action}, then wakes ${target}.`,
     `Deadline ${formatTime(watch.deadlineAt)} (${relative(watch.deadlineAt, Date.now())}).`,
   ]
   if (watch.slot) lines.push(`Then queues for slot ${watch.slot} (${store.slotSize(watch.slot)} places, ${store.holds(watch.slot).length} held, hold up to ${formatDuration(watch.holdMs!)}).`)
@@ -254,6 +279,32 @@ const number = (flag: string | undefined, fallback: number, name: string) => {
 }
 
 async function createWhen(kind: string | undefined, args: readonly string[]) {
+  if (kind === "exits") {
+    if (args.length) fail("pass the blocking command after -- : wake when exits --do <instruction> -- <command...>")
+    const target = await targetSession()
+    const now = Date.now()
+    const watch = parseOr(() =>
+      exitsWatch({
+        id: watchID(),
+        name: flags.name,
+        sessionID: target.sessionID,
+        instruction: flags.do ?? "",
+        now,
+        createdBy: process.env.OPENCODE_SESSION_ID,
+        command: command.length === 1 ? ["/bin/sh", "-c", command[0]!] : command,
+        deadlineMs: flags.deadline ? parseDuration(flags.deadline) : undefined,
+        timeoutMs: flags.timeout ? parseDuration(flags.timeout) : undefined,
+        maxFailures: flags.failures ? Number(flags.failures) : undefined,
+        cwd: resolve(flags.cwd ?? process.cwd()),
+        path: process.env.PATH,
+        ...queueFlags(),
+      }),
+    )
+    created(watch, target.title)
+    return
+  }
+
+  const now = Date.now()
   const stableMs = (fallback: string) => parseOr(() => parseDuration(flags.stable ?? fallback))
   let condition: Builtin
   if (kind === "capacity") {
@@ -267,9 +318,43 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
       return watch.id
     })
     condition = { type: "done", watches }
-  } else fail("wake when capacity|idle|done …")
+  } else if (kind === "gh-run") {
+    if (args.length) fail("wake when gh-run takes flags (--repo, --run, --workflow, --sha, --pr)")
+    const pr = flags.pr !== undefined ? number(flags.pr, 0, "pr") : undefined
+    condition = {
+      type: "gh-run",
+      repo: flags.repo ?? "",
+      runID: flags.run,
+      workflow: flags.workflow,
+      sha: flags.sha,
+      pr,
+    }
+  } else if (kind === "pr-checks") {
+    if (args.length) fail("wake when pr-checks takes flags (--repo, --pr, [--required])")
+    condition = {
+      type: "pr-checks",
+      repo: flags.repo ?? "",
+      pr: flags.pr !== undefined ? number(flags.pr, 0, "pr") : 0,
+      required: flags.required || undefined,
+    }
+  } else if (kind === "npm") {
+    const pkg = flags.package ?? args[0] ?? ""
+    if (args.length > (flags.package ? 0 : 1)) fail("wake when npm --package NAME (--tag TAG --changes | --newer-than VERSION | --published-after TIME)")
+    const modes = [Boolean(flags.changes), flags["newer-than"] !== undefined, flags["published-after"] !== undefined].filter(Boolean).length
+    if (modes !== 1) fail("pick one of --changes (with --tag TAG), --newer-than VERSION, or --published-after TIME")
+    if (flags.from !== undefined && !flags.changes) fail("--from goes with --changes")
+    const publishedAfter = flags["published-after"] !== undefined ? parseOr(() => parseTime(flags["published-after"]!, now)) : undefined
+    condition = {
+      type: "npm",
+      pkg,
+      tag: flags.tag ?? (flags.changes ? "latest" : undefined),
+      mode: flags.changes ? "changes" : flags["newer-than"] !== undefined ? "newer-than" : "published-after",
+      from: flags.from,
+      newerThan: flags["newer-than"],
+      publishedAfter,
+    }
+  } else fail("wake when capacity|idle|done|gh-run|pr-checks|npm|exits …")
   const target = await targetSession()
-  const now = Date.now()
   const watch = parseOr(() =>
     whenWatch({
       id: watchID(),
@@ -297,6 +382,23 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
       const found = await sessionExists(session).catch((error: Error) => fail(error.message))
       if (!found.exists) fail(`session ${session} does not exist`)
     }
+  if (isEventBuiltin(condition) && !flags["no-check"]) {
+    const initial = await checkBuiltin(
+      watch,
+      condition,
+      { capacity: probeCapacity, sessionState, watchStatus: (ref) => store.find(ref)?.status, exec: runProbe },
+      Date.now(),
+    )
+    if (initial.check.type === "error")
+      fail(`the first check failed (${clip(initial.check.error)}); fix the arguments, or pass --no-check to start anyway`)
+    watch.lastValue = initial.check.value.slice(0, 4000)
+    if (initial.check.type === "pending") {
+      watch.checks = 1
+      watch.lastCheckAt = Date.now()
+      if (initial.check.baseline !== undefined) watch.baseline = initial.check.baseline
+      watch.dueAt = Date.now() + (initial.nextIntervalMs ?? watch.intervalMs!)
+    }
+  }
   created(watch, target.title)
 }
 
@@ -349,7 +451,9 @@ function row(watch: Watch, now: number) {
     watch.status === "active"
       ? watch.kind === "timer"
         ? `fires ${relative(watch.dueAt, now)}`
-        : `next check ${relative(watch.dueAt, now)}`
+        : watch.condition?.type === "exits" && watch.dueAt <= now
+          ? "running"
+          : `next check ${relative(watch.dueAt, now)}`
       : watch.status === "firing"
         ? "delivering"
         : `${watch.status} ${relative(watch.endedAt ?? watch.firedAt ?? watch.createdAt, now)}`
@@ -385,7 +489,12 @@ function show(watch: Watch) {
     lines.push(
       ["Command", watch.command ? redact(displayCommand(watch.command)) : undefined],
       ["Directory", watch.cwd],
-      ["Condition", `${describeCondition(watch.condition)}, every ${formatDuration(watch.intervalMs!)}`],
+      [
+        "Condition",
+        watch.condition?.type === "exits"
+          ? `${describeCondition(watch.condition)} (timeout ${formatDuration(watch.timeoutMs ?? Limits.defaultDeadlineMs)})`
+          : `${describeCondition(watch.condition)}, every ${formatDuration(watch.intervalMs!)}`,
+      ],
       ["Deadline", at(watch.deadlineAt)],
       ["Next check", watch.status === "active" ? at(watch.dueAt) : "–"],
       ["Last check", at(watch.lastCheckAt)],
@@ -447,7 +556,7 @@ function plist() {
   const home = process.env.HOME!
   const bun = process.execPath
   const cli = resolve(import.meta.dir, "cli.ts")
-  const path = [`${home}/.bun/bin`, `${home}/.local/bin`, `${home}/bin`, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":")
+  const path = defaultPath()
   const log = join(store.root, "daemon.log")
   console.log(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

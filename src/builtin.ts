@@ -1,5 +1,6 @@
 import type { Check, RunResult } from "./condition.ts"
-import type { Builtin, Status, Watch } from "./watch.ts"
+import { ghBinary, npmBinary } from "./system.ts"
+import { Limits, type Builtin, type Status, type Watch } from "./watch.ts"
 
 export type SessionState = "idle" | "busy" | "missing"
 
@@ -8,6 +9,8 @@ export interface BuiltinDeps {
   readonly capacity: (watch: Watch) => Promise<RunResult>
   readonly sessionState: (sessionID: string) => Promise<SessionState>
   readonly watchStatus: (ref: string) => Status | undefined
+  /** Runs an external CLI probe (`gh` or `npm`) at the command-runner boundary. */
+  readonly exec?: (argv: readonly string[], watch: Watch) => Promise<RunResult>
 }
 
 export interface Capacity {
@@ -31,9 +34,275 @@ export const describeCapacity = (capacity: Capacity) =>
 export interface BuiltinCheck {
   readonly check: Check
   readonly heldSince?: number
+  readonly nextIntervalMs?: number
+}
+
+interface GhRunSummary {
+  readonly databaseId: number
+  readonly headSha?: string
+  readonly status: string
+  readonly conclusion?: string
+  readonly url: string
+  readonly workflowName?: string
+  readonly jobs?: readonly { readonly name: string; readonly status?: string; readonly conclusion?: string }[]
+}
+
+interface PrCheckItem {
+  readonly name: string
+  readonly state?: string
+  readonly bucket: string
+  readonly workflow?: string
+  readonly link?: string
+}
+
+interface NpmMetadata {
+  readonly "dist-tags"?: Record<string, string>
+  readonly time?: Record<string, string>
+  readonly version?: string
 }
 
 const minutes = (ms: number) => `${Math.floor(ms / 60_000)}m`
+
+function execError(label: string, result: RunResult) {
+  if (result.error !== undefined) return result.error
+  if (result.timedOut) return `${label} timed out`
+  if (result.exitCode !== 0) {
+    const detail = (result.stderr.trim() || result.stdout.trim()).split("\n").at(-1) ?? ""
+    return `${label} exit ${result.exitCode}${detail ? `: ${detail}` : ""}`
+  }
+  return undefined
+}
+
+const adaptiveInterval = (watch: Watch, targetMs: number) =>
+  watch.intervalMs === undefined || watch.intervalMs === Limits.eventIntervalMs ? targetMs : undefined
+
+function formatRunDetail(detail: GhRunSummary, watch: Watch): BuiltinCheck {
+  if (detail.status !== "completed") {
+    const jobs = detail.jobs ?? []
+    const done = jobs.filter((job) => job.status === "completed").length
+    const progress = jobs.length > 0 ? ` (${done}/${jobs.length} jobs)` : ""
+    const nextMs = detail.status === "in_progress" ? 15_000 : 10_000
+    return {
+      check: { type: "pending", value: `${detail.status}${progress} · ${detail.workflowName || "run"} #${detail.databaseId} · ${detail.url}` },
+      nextIntervalMs: adaptiveInterval(watch, nextMs),
+    }
+  }
+  const conclusion = detail.conclusion || "completed"
+  const failedJobs = (detail.jobs ?? [])
+    .filter((job) => job.conclusion && !["success", "skipped", "neutral"].includes(job.conclusion))
+    .map((job) => job.name)
+  const failedText = failedJobs.length > 0 ? failedJobs.join(", ") : "none"
+  return { check: { type: "met", value: `conclusion: ${conclusion} · failed jobs: ${failedText} · ${detail.url}` } }
+}
+
+async function checkGhRun(watch: Watch, condition: Extract<Builtin, { readonly type: "gh-run" }>, exec: NonNullable<BuiltinDeps["exec"]>): Promise<BuiltinCheck> {
+  const gh = ghBinary()
+  const viewRun = async (runID: string | number): Promise<BuiltinCheck> => {
+    const result = await exec([gh, "run", "view", String(runID), "-R", condition.repo, "--json", "databaseId,status,conclusion,url,workflowName,headSha,jobs"], watch)
+    const err = execError("gh run view", result)
+    if (err) return { check: { type: "error", error: err } }
+    try {
+      return formatRunDetail(JSON.parse(result.stdout) as GhRunSummary, watch)
+    } catch {
+      return { check: { type: "error", error: "could not parse gh run view JSON" } }
+    }
+  }
+
+  if (condition.runID) return viewRun(condition.runID)
+
+  let candidateShas: string[] = []
+  if (condition.pr !== undefined) {
+    const prResult = await exec([gh, "pr", "view", String(condition.pr), "-R", condition.repo, "--json", "headRefOid,mergeCommit,state"], watch)
+    const err = execError("gh pr view", prResult)
+    if (err) return { check: { type: "error", error: err } }
+    try {
+      const pr = JSON.parse(prResult.stdout) as { headRefOid?: string; mergeCommit?: { oid?: string } | null }
+      candidateShas = [pr.mergeCommit?.oid, pr.headRefOid].filter((sha): sha is string => Boolean(sha))
+    } catch {
+      return { check: { type: "error", error: "could not parse gh pr view JSON" } }
+    }
+    if (candidateShas.length === 0) return { check: { type: "error", error: `no commit SHA found for PR #${condition.pr}` } }
+  } else if (condition.sha) {
+    candidateShas = [condition.sha]
+  }
+
+  const listArgs = [
+    gh,
+    "run",
+    "list",
+    "-R",
+    condition.repo,
+    ...(condition.workflow ? ["--workflow", condition.workflow] : []),
+    ...(candidateShas.length === 1 && candidateShas[0]!.length === 40 ? ["--commit", candidateShas[0]!] : []),
+    "--limit",
+    "30",
+    "--json",
+    "databaseId,headSha,status,conclusion,url,workflowName",
+  ]
+  const listResult = await exec(listArgs, watch)
+  const listErr = execError("gh run list", listResult)
+  if (listErr) return { check: { type: "error", error: listErr } }
+  let runs: GhRunSummary[]
+  try {
+    runs = JSON.parse(listResult.stdout) as GhRunSummary[]
+  } catch {
+    return { check: { type: "error", error: "could not parse gh run list JSON" } }
+  }
+
+  const matching =
+    candidateShas
+      .map((sha) => runs.filter((run) => run.headSha?.toLowerCase().startsWith(sha.toLowerCase())))
+      .find((list) => list.length > 0) ?? []
+
+  if (matching.length === 0) {
+    const label = condition.pr !== undefined ? `PR #${condition.pr} (${candidateShas[0]!.slice(0, 10)})` : candidateShas[0]!.slice(0, 10)
+    return {
+      check: { type: "pending", value: `waiting for ${condition.workflow ?? "workflow"} run on ${label}` },
+      nextIntervalMs: adaptiveInterval(watch, 10_000),
+    }
+  }
+
+  const target = matching[0]!
+  if (target.status !== "completed") {
+    const nextMs = target.status === "in_progress" ? 15_000 : 10_000
+    return {
+      check: { type: "pending", value: `${target.status} · ${target.workflowName || condition.workflow || "run"} #${target.databaseId} · ${target.url}` },
+      nextIntervalMs: adaptiveInterval(watch, nextMs),
+    }
+  }
+  return viewRun(target.databaseId)
+}
+
+async function checkPrChecks(watch: Watch, condition: Extract<Builtin, { readonly type: "pr-checks" }>, exec: NonNullable<BuiltinDeps["exec"]>): Promise<BuiltinCheck> {
+  const args = [
+    ghBinary(),
+    "pr",
+    "checks",
+    String(condition.pr),
+    "-R",
+    condition.repo,
+    ...(condition.required ? ["--required"] : []),
+    "--json",
+    "name,state,bucket,workflow,link",
+  ]
+  const result = await exec(args, watch)
+  if (result.error !== undefined) return { check: { type: "error", error: result.error } }
+  if (result.timedOut) return { check: { type: "error", error: "gh pr checks timed out" } }
+  const combined = `${result.stdout} ${result.stderr}`.trim()
+  if (/no checks reported|no required checks/i.test(combined))
+    return { check: { type: "pending", value: `waiting for checks on PR #${condition.pr}` } }
+  if (!result.stdout.trim().startsWith("[")) {
+    const err = execError("gh pr checks", result)
+    return { check: { type: "error", error: err ?? "could not read gh pr checks output" } }
+  }
+  let checks: PrCheckItem[]
+  try {
+    checks = JSON.parse(result.stdout) as PrCheckItem[]
+  } catch {
+    return { check: { type: "error", error: "could not parse gh pr checks JSON" } }
+  }
+  if (checks.length === 0) return { check: { type: "pending", value: `waiting for checks on PR #${condition.pr}` } }
+  const pending = checks.filter((item) => item.bucket === "pending")
+  const failed = checks.filter((item) => item.bucket === "fail" || item.bucket === "cancel")
+  const passed = checks.filter((item) => item.bucket === "pass" || item.bucket === "skipping")
+  if (pending.length > 0)
+    return {
+      check: {
+        type: "pending",
+        value: `pending (${pending.length}/${checks.length}): ${pending.map((item) => item.name).join(", ")} · ${passed.length} pass, ${failed.length} fail`,
+      },
+    }
+  const failNames = failed.map((item) => item.name).join(", ") || "none"
+  const passNames = passed.map((item) => item.name).join(", ") || "none"
+  const summary = failed.length > 0 ? `fail (${failed.length} failed, ${passed.length} passed)` : `pass (${passed.length}/${checks.length} passed)`
+  return { check: { type: "met", value: `${summary} · fail: ${failNames} · pass: ${passNames}` } }
+}
+
+export function isVersionNewer(candidate: string, baseline: string, timeMap: Record<string, string>) {
+  if (candidate === baseline) return false
+  const candTime = timeMap[candidate] ? Date.parse(timeMap[candidate]!) : Number.NaN
+  const baseTime = timeMap[baseline] ? Date.parse(timeMap[baseline]!) : Number.NaN
+  if (!Number.isNaN(candTime) && !Number.isNaN(baseTime) && candTime !== baseTime) return candTime > baseTime
+  try {
+    return Bun.semver.order(candidate, baseline) > 0
+  } catch {
+    return candidate !== baseline
+  }
+}
+
+function newestPublishedVersion(timeMap: Record<string, string>) {
+  const entries = Object.entries(timeMap)
+    .filter(([key]) => key !== "created" && key !== "modified" && key !== "unpublished")
+    .map(([version, iso]) => ({ version, iso, ms: Date.parse(iso) }))
+    .filter((entry) => !Number.isNaN(entry.ms))
+    .sort((a, b) => b.ms - a.ms)
+  return entries[0]
+}
+
+async function checkNpm(watch: Watch, condition: Extract<Builtin, { readonly type: "npm" }>, exec: NonNullable<BuiltinDeps["exec"]>): Promise<BuiltinCheck> {
+  const result = await exec([npmBinary(), "view", condition.pkg, "dist-tags", "time", "version", "--json"], watch)
+  const err = execError("npm view", result)
+  if (err) return { check: { type: "error", error: err } }
+  let data: NpmMetadata
+  try {
+    data = JSON.parse(result.stdout) as NpmMetadata
+  } catch {
+    return { check: { type: "error", error: "could not parse npm view JSON" } }
+  }
+  const distTags = data["dist-tags"] ?? {}
+  const timeMap = data.time ?? {}
+  const formatVer = (version: string) => `${condition.pkg}@${version} (published ${timeMap[version] ?? "unknown"})`
+
+  if (condition.mode === "changes") {
+    const tag = condition.tag ?? "latest"
+    const current = distTags[tag]
+    if (!current) return { check: { type: "error", error: `dist-tag "${tag}" not found on ${condition.pkg}` } }
+    const value = formatVer(current)
+    const from = condition.from ?? watch.baseline
+    if (from === undefined) return { check: { type: "pending", value, baseline: current } }
+    return current !== from ? { check: { type: "met", value, from: formatVer(from) } } : { check: { type: "pending", value } }
+  }
+
+  if (condition.mode === "newer-than") {
+    const target = condition.newerThan!
+    if (condition.tag) {
+      const current = distTags[condition.tag]
+      if (!current) return { check: { type: "error", error: `dist-tag "${condition.tag}" not found on ${condition.pkg}` } }
+      const value = formatVer(current)
+      return isVersionNewer(current, target, timeMap)
+        ? { check: { type: "met", value, from: formatVer(target) } }
+        : { check: { type: "pending", value } }
+    }
+    if (timeMap[target]) {
+      const newest = newestPublishedVersion(timeMap)
+      if (!newest) return { check: { type: "error", error: `no versions found for ${condition.pkg}` } }
+      const value = formatVer(newest.version)
+      return isVersionNewer(newest.version, target, timeMap)
+        ? { check: { type: "met", value, from: formatVer(target) } }
+        : { check: { type: "pending", value: formatVer(target) } }
+    }
+    const candidate = distTags.latest ?? data.version ?? newestPublishedVersion(timeMap)?.version
+    if (!candidate) return { check: { type: "error", error: `no versions found for ${condition.pkg}` } }
+    const value = formatVer(candidate)
+    return isVersionNewer(candidate, target, timeMap)
+      ? { check: { type: "met", value, from: `${condition.pkg}@${target}` } }
+      : { check: { type: "pending", value } }
+  }
+
+  const afterMs = condition.publishedAfter!
+  if (condition.tag) {
+    const current = distTags[condition.tag]
+    if (!current) return { check: { type: "error", error: `dist-tag "${condition.tag}" not found on ${condition.pkg}` } }
+    const publishedMs = timeMap[current] ? Date.parse(timeMap[current]!) : Number.NaN
+    if (Number.isNaN(publishedMs)) return { check: { type: "error", error: `no publish time for ${condition.pkg}@${current}` } }
+    const value = formatVer(current)
+    return publishedMs > afterMs ? { check: { type: "met", value } } : { check: { type: "pending", value } }
+  }
+  const newest = newestPublishedVersion(timeMap)
+  if (!newest) return { check: { type: "error", error: `no publish timestamps found for ${condition.pkg}` } }
+  const value = formatVer(newest.version)
+  return newest.ms > afterMs ? { check: { type: "met", value } } : { check: { type: "pending", value } }
+}
 
 /**
  * A steady condition must hold continuously for `stableMs`. The window also restarts at the slot's last
@@ -80,6 +349,18 @@ export async function checkBuiltin(watch: Watch, condition: Builtin, deps: Built
       const value = states.map(([ref, status]) => `${ref} ${status}`).join(" · ")
       const ended = states.every(([, status]) => status !== "active" && status !== "firing")
       return { check: ended ? { type: "met", value } : { type: "pending", value } }
+    }
+    case "gh-run": {
+      if (!deps.exec) throw new Error("gh-run condition needs an exec probe")
+      return checkGhRun(watch, condition, deps.exec)
+    }
+    case "pr-checks": {
+      if (!deps.exec) throw new Error("pr-checks condition needs an exec probe")
+      return checkPrChecks(watch, condition, deps.exec)
+    }
+    case "npm": {
+      if (!deps.exec) throw new Error("npm condition needs an exec probe")
+      return checkNpm(watch, condition, deps.exec)
     }
   }
 }

@@ -41,8 +41,10 @@ export class Harness {
   now = Date.UTC(2026, 9, 9, 18, 0, 0)
   readonly server = new FakeOpenCode()
   readonly runs: Watch[] = []
+  readonly probes: (readonly string[])[] = []
   readonly logs: string[] = []
   results: RunResult[] = []
+  probeResults: RunResult[] = []
   /** The capacity summary the probe prints, as `mac-sim-lease --status` would. */
   capacity = capacityLine(50, 0, 60)
   readonly sessions = new Map<string, "idle" | "busy" | "missing">()
@@ -69,6 +71,10 @@ export class Harness {
         capacity: async () => ok(this.capacity),
         sessionState: async (session) => this.sessions.get(session) ?? "busy",
         watchStatus: (ref) => this.store.find(ref)?.status,
+        exec: async (argv) => {
+          this.probes.push(argv)
+          return this.probeResults.shift() ?? ok("")
+        },
       },
     })
   }

@@ -6,14 +6,21 @@ Wake an OpenCode session later: at a time, or when a polled command's output cha
 wake in 2h --do "Check whether the deploy finished and report."
 wake at "tomorrow 9:00" --session ses_… --name standup --do "Post standup notes."
 
+# Wait for a GitHub Actions workflow run (or PR checks, or an npm publish)
+wake when gh-run --repo anomalyco/opencode --workflow publish.yml --sha 41b03dea0f --name publish-41b03d \
+  --do "If publish succeeded, wait for @opencode/client@dev on npm; if failed, run gh-fail."
+wake when pr-checks --repo anomalyco/opencode --pr 54218 --name ci-54218 \
+  --do "CI finished: fix failures, or merge if green."
+wake when npm --package @opencode/client --tag dev --changes --name opencode-client-dev \
+  --do "Bump OpenCode and @effect/* to the newly published dev version."
+
+# Run a blocking command and wake when it exits
+wake when exits --name gh-watch --do "Inspect the finished run." -- gh run watch 38007696000 --exit-status
+
+# Custom poll when no built-in covers the check
 wake poll --every 5m --changes --from SUBMITTED --name ramp-mac \
   --do "Ramp request decided: finish the checkout if approved (todo ef10f090)." \
   -- 'ramp requests get 01a122f9-… --agent | jq -r ".data[0].status"'
-
-cd ~/code/open-source/opencode   # gh resolves the repo from the watch's directory
-wake poll --every 2m --changes --from pending --deadline 3h --name ci-54218 \
-  --do "CI finished: fix failures, or merge if green." \
-  -- 'gh pr checks 54218 --json bucket -q "if any(.[]; .bucket == \"pending\") then \"pending\" else (map(.bucket) | unique | join(\",\")) end" || true'
 
 wake list            # open watches with next check and last value
 wake show ramp-mac   # full state: last check, last value, failures, delivery
@@ -45,6 +52,21 @@ For value conditions, a non-zero exit, empty output, or timeout is a failed chec
 Some waits are common enough that the daemon evaluates them itself, so nobody writes a probe script:
 
 ```sh
+# GitHub Actions workflow runs and PR checks (adaptive 10–15s polling)
+wake when gh-run --repo anomalyco/opencode --workflow publish.yml --sha 41b03dea0f \
+  --do "Check the publish conclusion; if green, wait for @opencode/client on npm."
+wake when gh-run --repo anomalyco/opencode --pr 54198 --workflow publish.yml --do "…"
+wake when gh-run --repo anomalyco/opencode --run 38007696000 --do "…"
+wake when pr-checks --repo anomalyco/opencode --pr 54275 --do "Check PR CI results."
+
+# npm package publishes (default 15s polling; reports version and publish timestamp)
+wake when npm --package @opencode/client --tag dev --changes --do "…"
+wake when npm --package @opencode/client --newer-than 0.0.0-dev-20800 --do "…"
+wake when npm --package @opencode/client --published-after 2026-10-10T07:55:00Z --do "…"
+
+# Any command that blocks until an event (re-runs across daemon restarts)
+wake when exits --timeout 30m --do "Run finished." -- gh run watch 38007696000 --exit-status
+
 # Run heavy work when the Mac has room, one job at a time
 wake when capacity --slot heavy --name perf-proofs \
   --do "Capacity granted: run the native and CLI proofs, then wake release."
@@ -56,6 +78,10 @@ wake when done perf-proofs --do "Proofs finished; summarize."
 
 | Condition | Holds when |
 | --- | --- |
+| `gh-run` | the GitHub Actions run (`--run ID`, `--workflow FILE --sha SHA`, or `--pr N [--workflow FILE]` on `--repo OWNER/REPO`) appears and reaches `completed`. Polls every 10s while waiting/queued and 15s while `in_progress`; reports conclusion, failed job names and the run URL. |
+| `pr-checks` | every check on `--repo OWNER/REPO --pr N` (or `--required` checks) has finished (`bucket != pending`). Default every 15s; reports pass and fail check names. |
+| `npm` | `--package NAME` has a new version on `--tag TAG --changes [--from V]`, a version `--newer-than VERSION`, or a version `--published-after TIME`. Default every 15s; reports version and publish time. |
+| `exits` | the blocking command after `--` exits (with any exit code), reporting the exit code and output tail. Re-runs if the daemon restarts while waiting, and respects `--timeout` and `--deadline`. |
 | `capacity` | 3-minute CPU mean ≤ `--cpu` (70), at most `--builds` (1) xcodebuilds, ≥ `--disk` (20) GB free, continuously for `--stable` (3m). Read from `mac-sim-lease --status`, which owns the Mac's capacity signals; override with `$WAKE_CAPACITY_COMMAND`. |
 | `idle ses_…` | every listed OpenCode session has finished its run (`time.idle ≥ time.updated`) and stayed idle for `--stable` (2m) |
 | `done <watch>…` | every listed watch has ended: fired, expired, failed or cancelled |

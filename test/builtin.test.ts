@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { parseCapacity } from "../src/builtin.ts"
-import { whenWatch } from "../src/create.ts"
+import { isVersionNewer, parseCapacity } from "../src/builtin.ts"
+import { exitsWatch, whenWatch } from "../src/create.ts"
 import type { Builtin } from "../src/watch.ts"
-import { capacityLine, Harness, SESSION } from "./helpers.ts"
+import { capacityLine, Harness, ok, SESSION } from "./helpers.ts"
 
 const minute = 60_000
 const capacity = (stableMs = 3 * minute): Builtin => ({ type: "capacity", cpu: 70, builds: 1, diskGB: 20, stableMs })
@@ -175,12 +175,297 @@ describe("wake when idle and done", () => {
   })
 })
 
+describe("wake when gh-run", () => {
+  test("waits for a workflow run to appear, adapts interval from 10s to 15s, and wakes with conclusion, failed jobs and URL", async () => {
+    const h = new Harness()
+    const watch = when(h, "publish", {
+      type: "gh-run",
+      repo: "anomalyco/opencode",
+      workflow: "publish.yml",
+      sha: "41b03dea0f",
+    })
+    expect(watch.intervalMs).toBe(15_000)
+
+    const url = "https://github.com/anomalyco/opencode/actions/runs/38036095840"
+    h.probeResults = [
+      // 1. Not created yet
+      ok(JSON.stringify([])),
+      // 2. Appeared and in_progress
+      ok(
+        JSON.stringify([
+          {
+            databaseId: 38036095840,
+            headSha: "41b03dea0f1a35a09840800955d44c6b698c79dd",
+            status: "in_progress",
+            conclusion: "",
+            url,
+            workflowName: "publish",
+          },
+        ]),
+      ),
+      // 3. Completed in list -> triggers gh run view for jobs
+      ok(
+        JSON.stringify([
+          {
+            databaseId: 38036095840,
+            headSha: "41b03dea0f1a35a09840800955d44c6b698c79dd",
+            status: "completed",
+            conclusion: "success",
+            url,
+            workflowName: "publish",
+          },
+        ]),
+      ),
+      ok(
+        JSON.stringify({
+          databaseId: 38036095840,
+          headSha: "41b03dea0f1a35a09840800955d44c6b698c79dd",
+          status: "completed",
+          conclusion: "success",
+          url,
+          workflowName: "publish",
+          jobs: [
+            { name: "version", status: "completed", conclusion: "success" },
+            { name: "publish", status: "completed", conclusion: "success" },
+          ],
+        }),
+      ),
+    ]
+
+    await h.tick()
+    expect(h.get(watch.id).lastValue).toContain("waiting for publish.yml run on 41b03dea0f")
+    // Adaptive interval while waiting to appear is 10s
+    expect(h.get(watch.id).dueAt).toBe(h.now + 10_000)
+
+    h.advance(10_000)
+    await h.tick()
+    expect(h.get(watch.id).lastValue).toContain("in_progress · publish #38036095840")
+    // Adaptive interval while in_progress is 15s
+    expect(h.get(watch.id).dueAt).toBe(h.now + 15_000)
+    expect(h.server.messages.size).toBe(0)
+
+    h.advance(15_000)
+    await h.tick()
+    expect(h.server.messages.size).toBe(1)
+    const text = h.server.texts[0]!
+    expect(text).toContain("conclusion: success · failed jobs: none")
+    expect(text).toContain(url)
+    expect(h.get(watch.id).status).toBe("done")
+  })
+
+  test("watches a run by ID and reports failed job names when it fails", async () => {
+    const h = new Harness()
+    const url = "https://github.com/anomalyco/opencode/actions/runs/38012336134"
+    when(h, "ci-run", { type: "gh-run", repo: "anomalyco/opencode", runID: "38012336134" })
+    h.probeResults = [
+      ok(
+        JSON.stringify({
+          databaseId: 38012336134,
+          status: "in_progress",
+          conclusion: "",
+          url,
+          workflowName: "test",
+          jobs: [
+            { name: "unit (linux)", status: "completed", conclusion: "failure" },
+            { name: "e2e (linux)", status: "in_progress", conclusion: "" },
+          ],
+        }),
+      ),
+      ok(
+        JSON.stringify({
+          databaseId: 38012336134,
+          status: "completed",
+          conclusion: "failure",
+          url,
+          workflowName: "test",
+          jobs: [
+            { name: "unit (linux)", status: "completed", conclusion: "failure" },
+            { name: "e2e (linux)", status: "completed", conclusion: "cancelled" },
+            { name: "typecheck", status: "completed", conclusion: "success" },
+          ],
+        }),
+      ),
+    ]
+    await h.tick()
+    expect(h.server.messages.size).toBe(0)
+    h.advance(15_000)
+    await h.tick()
+    expect(h.server.messages.size).toBe(1)
+    expect(h.server.texts[0]).toContain("conclusion: failure · failed jobs: unit (linux), e2e (linux)")
+    expect(h.server.texts[0]).toContain(url)
+  })
+
+  test("resolves a merged PR's mergeCommit SHA for workflow runs", async () => {
+    const h = new Harness()
+    const url = "https://github.com/anomalyco/opencode/actions/runs/38036095840"
+    when(h, "pr-publish", { type: "gh-run", repo: "anomalyco/opencode", pr: 54198, workflow: "publish.yml" })
+    h.probeResults = [
+      ok(
+        JSON.stringify({
+          headRefOid: "a178639f3571ba817c7d34beee55528c4d0b82f0",
+          mergeCommit: { oid: "41b03dea0f1a35a09840800955d44c6b698c79dd" },
+          state: "MERGED",
+        }),
+      ),
+      ok(
+        JSON.stringify([
+          {
+            databaseId: 38036095840,
+            headSha: "41b03dea0f1a35a09840800955d44c6b698c79dd",
+            status: "completed",
+            conclusion: "success",
+            url,
+            workflowName: "publish",
+          },
+        ]),
+      ),
+      ok(
+        JSON.stringify({
+          databaseId: 38036095840,
+          headSha: "41b03dea0f1a35a09840800955d44c6b698c79dd",
+          status: "completed",
+          conclusion: "success",
+          url,
+          workflowName: "publish",
+          jobs: [{ name: "publish", status: "completed", conclusion: "success" }],
+        }),
+      ),
+    ]
+    await h.tick()
+    expect(h.server.messages.size).toBe(1)
+    expect(h.server.texts[0]).toContain("conclusion: success · failed jobs: none")
+    expect(h.server.texts[0]).toContain(url)
+  })
+})
+
+describe("wake when pr-checks", () => {
+  test("waits while checks are pending and wakes with pass/fail check lists when done", async () => {
+    const h = new Harness()
+    const watch = when(h, "pr-54275", { type: "pr-checks", repo: "anomalyco/opencode", pr: 54275, required: true })
+    h.probeResults = [
+      ok("no checks reported on the 'feature' branch", 1),
+      ok(
+        JSON.stringify([
+          { name: "typecheck", bucket: "pass", state: "SUCCESS" },
+          { name: "unit (linux)", bucket: "pending", state: "IN_PROGRESS" },
+        ]),
+        8,
+      ),
+      ok(
+        JSON.stringify([
+          { name: "typecheck", bucket: "pass", state: "SUCCESS" },
+          { name: "unit (linux)", bucket: "fail", state: "FAILURE" },
+        ]),
+        1,
+      ),
+    ]
+    await h.tick()
+    expect(h.probes[0]).toContain("--required")
+    expect(h.get(watch.id).lastValue).toContain("waiting for checks on PR #54275")
+
+    h.advance(15_000)
+    await h.tick()
+    expect(h.get(watch.id).lastValue).toContain("pending (1/2): unit (linux) · 1 pass, 0 fail")
+    expect(h.server.messages.size).toBe(0)
+
+    h.advance(15_000)
+    await h.tick()
+    expect(h.server.messages.size).toBe(1)
+    expect(h.server.texts[0]).toContain("fail (1 failed, 1 passed) · fail: unit (linux) · pass: typecheck")
+  })
+})
+
+describe("wake when npm", () => {
+  const npmPayload = (devVersion: string, devTime: string) =>
+    JSON.stringify({
+      "dist-tags": { latest: "2.0.26", dev: devVersion },
+      time: {
+        created: "2026-09-02T21:21:38.527Z",
+        modified: devTime,
+        "2.0.26": "2026-10-08T19:42:18.708Z",
+        "0.0.0-dev-20800": "2026-10-10T00:20:09.487Z",
+        ...(devVersion !== "0.0.0-dev-20800" ? { [devVersion]: devTime } : {}),
+      },
+      version: "2.0.26",
+    })
+
+  test("tag --changes records baseline and wakes with new version and publish time", async () => {
+    const h = new Harness()
+    const watch = when(h, "client-dev", { type: "npm", pkg: "@opencode/client", tag: "dev", mode: "changes" })
+    h.probeResults = [
+      ok(npmPayload("0.0.0-dev-20800", "2026-10-10T00:20:09.487Z")),
+      ok(npmPayload("0.0.0-dev-20800", "2026-10-10T00:20:09.487Z")),
+      ok(npmPayload("0.0.0-dev-20801", "2026-10-10T01:12:45.100Z")),
+    ]
+    await h.tick()
+    expect(h.get(watch.id).baseline).toBe("0.0.0-dev-20800")
+    expect(h.server.messages.size).toBe(0)
+
+    h.advance(15_000)
+    await h.tick()
+    expect(h.server.messages.size).toBe(0)
+
+    h.advance(15_000)
+    await h.tick()
+    expect(h.server.messages.size).toBe(1)
+    expect(h.server.texts[0]).toContain("@opencode/client@0.0.0-dev-20800 (published 2026-10-10T00:20:09.487Z) → @opencode/client@0.0.0-dev-20801 (published 2026-10-10T01:12:45.100Z)")
+  })
+
+  test("--newer-than handles 0.0.0-dev-* prereleases using publish timestamps", async () => {
+    const h = new Harness()
+    when(h, "client-newer", { type: "npm", pkg: "@opencode/client", mode: "newer-than", newerThan: "0.0.0-dev-20800" })
+    h.probeResults = [
+      ok(npmPayload("0.0.0-dev-20800", "2026-10-10T00:20:09.487Z")),
+      ok(npmPayload("0.0.0-dev-20801", "2026-10-10T01:12:45.100Z")),
+    ]
+    await h.tick()
+    expect(h.server.messages.size).toBe(0)
+    h.advance(15_000)
+    await h.tick()
+    expect(h.server.messages.size).toBe(1)
+    expect(h.server.texts[0]).toContain("@opencode/client@0.0.0-dev-20801 (published 2026-10-10T01:12:45.100Z)")
+  })
+
+  test("--published-after wakes once a version is published after the target timestamp", async () => {
+    const h = new Harness()
+    when(h, "client-after", {
+      type: "npm",
+      pkg: "@opencode/client",
+      tag: "dev",
+      mode: "published-after",
+      publishedAfter: Date.parse("2026-10-10T00:30:00Z"),
+    })
+    h.probeResults = [
+      ok(npmPayload("0.0.0-dev-20800", "2026-10-10T00:20:09.487Z")),
+      ok(npmPayload("0.0.0-dev-20801", "2026-10-10T01:12:45.100Z")),
+    ]
+    await h.tick()
+    expect(h.server.messages.size).toBe(0)
+    h.advance(15_000)
+    await h.tick()
+    expect(h.server.messages.size).toBe(1)
+    expect(h.server.texts[0]).toContain("@opencode/client@0.0.0-dev-20801 (published 2026-10-10T01:12:45.100Z)")
+  })
+
+  test("isVersionNewer falls back to semver when timestamps are absent", () => {
+    expect(isVersionNewer("2.0.27", "2.0.26", {})).toBe(true)
+    expect(isVersionNewer("2.0.26", "2.0.26", {})).toBe(false)
+    expect(isVersionNewer("2.0.25", "2.0.26", {})).toBe(false)
+  })
+})
+
 describe("validation", () => {
-  test("rejects bad slots, holds and sessions", () => {
+  test("rejects bad slots, holds, sessions and event condition flags", () => {
     const base = { id: "wk_x", sessionID: SESSION, instruction: "x", now: 0 }
     expect(() => whenWatch({ ...base, condition: capacity(), slot: "bad slot" })).toThrow("--slot")
     expect(() => whenWatch({ ...base, condition: capacity(), holdMs: minute })).toThrow("--hold goes with --slot")
     expect(() => whenWatch({ ...base, condition: capacity(), slot: "heavy", holdMs: 13 * 3600_000 })).toThrow("--hold")
     expect(() => whenWatch({ ...base, condition: { type: "idle", sessions: ["nope"], stableMs: 0 } })).toThrow("not a session ID")
+    expect(() => whenWatch({ ...base, condition: { type: "gh-run", repo: "bad", runID: "123" } })).toThrow("--repo")
+    expect(() => whenWatch({ ...base, condition: { type: "gh-run", repo: "a/b" } })).toThrow("give one of")
+    expect(() => whenWatch({ ...base, condition: { type: "gh-run", repo: "a/b", sha: "41b03dea0f" } })).toThrow("--workflow")
+    expect(() => whenWatch({ ...base, condition: { type: "pr-checks", repo: "a/b", pr: 0 } })).toThrow("--pr")
+    expect(() => whenWatch({ ...base, condition: { type: "npm", pkg: "bad/pkg/name", mode: "changes" } })).toThrow("--package")
+    expect(() => exitsWatch({ ...base, command: [] })).toThrow("blocking command")
   })
 })

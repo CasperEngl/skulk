@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { pollWatch, timerWatch } from "../src/create.ts"
+import { exitsWatch, pollWatch, timerWatch } from "../src/create.ts"
 import { Limits } from "../src/watch.ts"
 import { Harness, ok, SESSION } from "./helpers.ts"
 
@@ -260,5 +260,102 @@ describe("restarts and delivery", () => {
     timer(h, 2 * hour, "late")
     timer(h, hour, "early")
     expect(h.engine.nextWakeAt()).toBe(h.now + hour)
+  })
+})
+
+describe("wake when exits", () => {
+  test("wakes when the blocking command exits with exit code and output tail", async () => {
+    for (const [exitCode, stdout, stderr] of [
+      [0, "line 1\nline 2\n✓ run 38007696000 completed\n", ""],
+      [1, "watching run...\n", "X job build-cli failed\n"],
+    ] as const) {
+      const h = new Harness()
+      const watch = exitsWatch({
+        id: "wk_exits",
+        name: "gh-watch",
+        sessionID: SESSION,
+        instruction: "Inspect the run.",
+        now: h.now,
+        command: ["gh", "run", "watch", "38007696000", "--exit-status"],
+      })
+      h.store.insert(watch)
+      h.results = [{ exitCode, stdout, stderr, timedOut: false }]
+      await h.tick()
+      expect(h.server.messages.size).toBe(1)
+      const text = h.server.texts[0]!
+      expect(text).toContain(`The command exited with code ${exitCode}.`)
+      expect(text).toContain("Output tail:")
+      expect(text).toContain(exitCode === 0 ? "✓ run 38007696000 completed" : "X job build-cli failed")
+      expect(h.get(watch.id).status).toBe("done")
+    }
+  })
+
+  test("survives daemon restarts by re-running the blocking command, and respects --timeout and --deadline", async () => {
+    const h = new Harness()
+    const watch = exitsWatch({
+      id: "wk_exits_restart",
+      name: "restartable",
+      sessionID: SESSION,
+      instruction: "Continue after exit.",
+      now: h.now,
+      command: ["gh", "run", "watch", "123", "--exit-status"],
+      timeoutMs: 10 * minute,
+      deadlineMs: 30 * minute,
+    })
+    h.store.insert(watch)
+
+    // Daemon restarts before the blocking command finishes: watch is still active in SQLite and re-runs
+    h.restart()
+    h.results = [ok("finished after restart\n", 0)]
+    await h.tick()
+    expect(h.runs.length).toBe(1)
+    expect(h.server.texts[0]).toContain("finished after restart")
+    expect(h.get(watch.id).status).toBe("done")
+
+    // Respects --timeout
+    const hTimeout = new Harness()
+    const timedOutWatch = exitsWatch({
+      id: "wk_exits_timeout",
+      name: "timeout-watch",
+      sessionID: SESSION,
+      instruction: "Handle timeout.",
+      now: hTimeout.now,
+      command: ["sleep", "999"],
+      timeoutMs: 2 * minute,
+      deadlineMs: 30 * minute,
+    })
+    hTimeout.store.insert(timedOutWatch)
+    hTimeout.results = [{ exitCode: null, stdout: "still waiting", stderr: "", timedOut: true }]
+    await hTimeout.tick()
+    expect(hTimeout.get(timedOutWatch.id).status).toBe("failed")
+    expect(hTimeout.server.texts[0]).toContain("timed out")
+
+    // Respects --deadline (clamps timeoutMs to remaining time and fires expired)
+    const hDeadline = new Harness()
+    const deadlineWatch = exitsWatch({
+      id: "wk_exits_deadline",
+      name: "deadline-watch",
+      sessionID: SESSION,
+      instruction: "Handle deadline.",
+      now: hDeadline.now,
+      command: ["sleep", "999"],
+      deadlineMs: 5 * minute,
+    })
+    hDeadline.store.insert(deadlineWatch)
+    hDeadline.advance(4 * minute)
+    hDeadline.results = [{ exitCode: null, stdout: "partial output", stderr: "", timedOut: true }]
+    const origRun = hDeadline.engine["deps"].run
+    hDeadline.engine = new (hDeadline.engine.constructor as typeof import("../src/engine.ts").Engine)({
+      ...hDeadline.engine["deps"],
+      run: async (w) => {
+        expect(w.timeoutMs).toBe(minute)
+        hDeadline.advance(minute)
+        return origRun(w)
+      },
+    })
+    await hDeadline.tick()
+    expect(hDeadline.get(deadlineWatch.id).status).toBe("expired")
+    expect(hDeadline.server.texts[0]).toContain("deadline reached")
+    expect(hDeadline.server.texts[0]).toContain("partial output")
   })
 })

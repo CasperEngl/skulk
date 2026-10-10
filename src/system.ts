@@ -13,9 +13,20 @@ async function readCapped(stream: ReadableStream<Uint8Array>) {
   return text.slice(0, maxOutput)
 }
 
+export function defaultPath() {
+  const home = process.env.HOME ?? ""
+  return [`${home}/.bun/bin`, `${home}/.local/bin`, `${home}/bin`, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":")
+}
+
+/** Merge the watch's captured PATH with the launchd standard PATH so `gh`, `npm` and `bun` always resolve. */
+export function daemonPath(watchPath?: string) {
+  const entries = [...(watchPath ? watchPath.split(":") : []), ...(process.env.PATH ? process.env.PATH.split(":") : []), ...defaultPath().split(":")].filter(Boolean)
+  return [...new Set(entries)].join(":")
+}
+
 /**
  * Runs argv in its own process group, so a timeout kills the whole pipeline. The command inherits this
- * process's environment, with PATH replaced by the one recorded when the watch was created.
+ * process's environment, with PATH augmented by the watch's PATH and launchd standard directories.
  */
 export async function runCommand(
   argv: readonly string[],
@@ -25,7 +36,7 @@ export async function runCommand(
   try {
     child = Bun.spawn([...argv], {
       cwd: options.cwd,
-      env: { ...process.env, ...(options.path ? { PATH: options.path } : {}) },
+      env: { ...process.env, PATH: daemonPath(options.path) },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -112,6 +123,12 @@ export const capacityCommand = () => process.env.WAKE_CAPACITY_COMMAND ?? "mac-s
 
 export const probeCapacity = (watch: Watch) =>
   runCommand(["/bin/sh", "-c", capacityCommand()], { path: watch.path, timeoutMs: 60_000 })
+
+export const ghBinary = () => process.env.WAKE_GH ?? "gh"
+export const npmBinary = () => process.env.WAKE_NPM ?? "npm"
+
+export const runProbe = (argv: readonly string[], watch: Watch) =>
+  runCommand(argv, { cwd: watch.cwd, path: watch.path, timeoutMs: watch.timeoutMs ?? 60_000 })
 
 /**
  * A session is idle when its last idle time is at or after its last update: OpenCode stamps `time.idle`
