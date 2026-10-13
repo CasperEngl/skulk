@@ -1,40 +1,55 @@
 {
   "name": "@kitlangton/skulk",
-  "private": true,
   "version": "0.1.0",
-  "license": "MIT",
   "description": "Durable timers, event triggers, and conditional session wake-ups for OpenCode agents.",
+  "license": "MIT",
+  "author": "Kit Langton",
+  "homepage": "https://skulk.kitlangton.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kitlangton/skulk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kitlangton/skulk/issues"
+  },
+  "keywords": [
+    "opencode",
+    "agents",
+    "ai-agents",
+    "scheduler",
+    "cli",
+    "launchd",
+    "systemd",
+    "github-actions",
+    "npm",
+    "wake"
+  ],
   "type": "module",
   "bin": {
-    "skulk": "./src/cli.ts",
-    "wake": "./src/cli.ts"
+    "skulk": "src/cli.ts",
+    "wake": "src/cli.ts"
   },
   "files": [
     "src",
-    "LICENSE"
+    "skills",
+    "LICENSE",
+    "README.md"
   ],
   "engines": {
     "bun": ">=1.2.0"
   },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/kitlangton/skulk.git"
+  "publishConfig": {
+    "access": "public"
   },
-  "keywords": [
-    "opencode",
-    "ai-agents",
-    "scheduler",
-    "cli"
-  ],
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "prepublishOnly": "bun run typecheck && bun run test"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "5.8.2",
     "wrangler": "4.150.0"
-  },
-  "homepage": "https://skulk.kitlangton.com"
+  }
 }
