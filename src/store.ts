@@ -1,6 +1,8 @@
 import { Database } from "bun:sqlite"
-import { chmodSync, mkdirSync } from "node:fs"
-import { join } from "node:path"
+import { chmodSync, closeSync, existsSync, openSync, mkdirSync, readdirSync, renameSync, rmSync, rmdirSync, statSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { env } from "./env.ts"
+import { daemonPID } from "./pid.ts"
 import { defaultSlotSize, Limits, type Status, type Watch } from "./watch.ts"
 
 export interface Hold {
@@ -15,8 +17,18 @@ export type Grant =
   | { readonly ok: true; readonly held: number; readonly size: number }
   | { readonly ok: false; readonly reason: string }
 
+/** Pre-rename names: state lived in ~/.local/state/wake/wake.db until the CLI became skulk. */
+export const databaseFile = "skulk.db"
+export const legacyDatabaseFile = "wake.db"
+
+/** Explicit $SKULK_HOME (or the pre-rename $WAKE_HOME) wins; otherwise ~/.local/state/skulk. */
 export function stateDirectory() {
-  return process.env.WAKE_HOME ?? join(process.env.HOME ?? "", ".local/state/wake")
+  return env("HOME") ?? join(process.env.HOME ?? "", ".local/state/skulk")
+}
+
+/** The pre-rename default directory, migrated automatically when no state directory is set explicitly. */
+export function legacyStateDirectory() {
+  return env("HOME") === undefined ? join(process.env.HOME ?? "", ".local/state/wake") : undefined
 }
 
 export function logDirectory(root = stateDirectory()) {
@@ -31,11 +43,121 @@ export function ensureStateDirectory(root = stateDirectory()) {
   return root
 }
 
+/** Folds the WAL into the main file, so the database is one file that can be renamed safely. False if busy. */
+function checkpoint(path: string) {
+  const db = new Database(path)
+  try {
+    db.exec("PRAGMA busy_timeout = 5000")
+    const [busy] = db.query("PRAGMA wal_checkpoint(TRUNCATE)").values()[0] ?? []
+    if (busy) return false
+  } finally {
+    db.close()
+  }
+  if (!existsSync(path + "-wal") || statSync(path + "-wal").size === 0)
+    for (const suffix of ["-wal", "-shm"]) rmSync(path + suffix, { force: true })
+  return true
+}
+
+const moved = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT"
+
+/** Moves `from`'s entries into `to` without overwriting anything already there. */
+function mergeDirectory(from: string, to: string) {
+  mkdirSync(to, { recursive: true, mode: 0o700 })
+  for (const entry of readdirSync(from)) {
+    const source = join(from, entry)
+    const target = join(to, entry)
+    if (entry === "daemon.pid") rmSync(source, { force: true })
+    else if (statSync(source).isDirectory() && existsSync(target)) mergeDirectory(source, target)
+    else if (!existsSync(target)) renameSync(source, target)
+    else if (entry === "daemon.log") renameSync(source, join(to, "daemon.wake.log"))
+  }
+  try {
+    rmdirSync(from)
+  } catch {}
+}
+
+/**
+ * Migrates pre-rename state: ~/.local/state/wake moves to ~/.local/state/skulk, and wake.db becomes
+ * skulk.db. Watches, IDs, slots and logs are kept as they are. Idempotent, and safe to call from every
+ * process: while a pre-rename daemon is still running it changes nothing and returns the old location.
+ */
+export function migrateState(root: string, legacyRoot: string | undefined): { root: string; database: string } {
+  const database = join(root, databaseFile)
+  const pending = () =>
+    !existsSync(database) &&
+    ((legacyRoot !== undefined && legacyRoot !== root && existsSync(join(legacyRoot, legacyDatabaseFile))) || existsSync(join(root, legacyDatabaseFile)))
+  if (!pending() && !(legacyRoot && legacyRoot !== root && existsSync(legacyRoot))) return { root, database }
+  return withMigrationLock(root, () => migrateUnlocked(root, legacyRoot))
+}
+
+/** Serializes migrations across processes, so no process writes the old database while another moves it. */
+function withMigrationLock<T>(root: string, run: () => T): T {
+  const lock = `${root}.migrating`
+  mkdirSync(dirname(root), { recursive: true })
+  const deadline = Date.now() + 15_000
+  while (true) {
+    try {
+      closeSync(openSync(lock, "wx", 0o600))
+      break
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > 30_000) rmSync(lock, { force: true })
+      } catch {}
+      if (Date.now() > deadline) throw new Error(`state migration is locked by ${lock}; remove it if no skulk process is running`)
+      Bun.sleepSync(25)
+    }
+  }
+  try {
+    return run()
+  } finally {
+    rmSync(lock, { force: true })
+  }
+}
+
+function migrateUnlocked(root: string, legacyRoot: string | undefined): { root: string; database: string } {
+  const database = join(root, databaseFile)
+  if (legacyRoot && legacyRoot !== root && existsSync(legacyRoot)) {
+    const legacyDatabase = join(legacyRoot, legacyDatabaseFile)
+    if (existsSync(legacyDatabase) && !existsSync(database)) {
+      if (daemonPID(legacyRoot) !== undefined) return { root: legacyRoot, database: legacyDatabase }
+      if (!checkpoint(legacyDatabase)) return { root: legacyRoot, database: legacyDatabase }
+      try {
+        mkdirSync(root, { recursive: true, mode: 0o700 })
+        renameSync(legacyDatabase, database)
+      } catch (error) {
+        if (!moved(error) || !existsSync(database)) throw error
+      }
+    }
+    if (!existsSync(legacyDatabase)) {
+      try {
+        mergeDirectory(legacyRoot, root)
+      } catch (error) {
+        if (!moved(error)) throw error
+      }
+    }
+  }
+  const legacyDatabase = join(root, legacyDatabaseFile)
+  if (!existsSync(database) && existsSync(legacyDatabase)) {
+    if (daemonPID(root) !== undefined) return { root, database: legacyDatabase }
+    if (!checkpoint(legacyDatabase)) return { root, database: legacyDatabase }
+    try {
+      renameSync(legacyDatabase, database)
+    } catch (error) {
+      if (!moved(error) || !existsSync(database)) throw error
+    }
+  }
+  return { root, database }
+}
+
 export class Store {
   readonly db: Database
+  readonly root: string
 
-  constructor(readonly root = ensureStateDirectory()) {
-    this.db = new Database(join(root, "wake.db"), { create: true })
+  constructor(root?: string) {
+    const state = migrateState(root ?? stateDirectory(), root === undefined ? legacyStateDirectory() : undefined)
+    this.root = ensureStateDirectory(state.root)
+    this.db = new Database(state.database, { create: true })
     this.db.exec("PRAGMA journal_mode = WAL")
     this.db.exec("PRAGMA busy_timeout = 5000")
     this.db.exec(`CREATE TABLE IF NOT EXISTS watches (
@@ -56,7 +178,7 @@ export class Store {
     )`)
     // Version 1 is the schema above; bump it with a migration when the schema changes.
     if (this.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version === 0) this.db.exec("PRAGMA user_version = 1")
-    chmodSync(join(root, "wake.db"), 0o600)
+    chmodSync(state.database, 0o600)
   }
 
   /** Deletes ended watches (and returns their IDs) that ended before `before`. */
@@ -80,7 +202,7 @@ export class Store {
     return this.db.transaction(() => {
       const open = this.open()
       if (open.length >= maxOpen)
-        throw new Error(`too many open watches (${open.length}/${maxOpen}); cancel some with \`wake cancel\``)
+        throw new Error(`too many open watches (${open.length}/${maxOpen}); cancel some with \`skulk cancel\``)
       if (open.some((other) => other.name === watch.name))
         throw new Error(`an open watch is already named ${watch.name}; pick another --name`)
       this.insert(watch)

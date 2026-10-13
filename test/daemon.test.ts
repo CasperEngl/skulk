@@ -25,7 +25,7 @@ test("the real daemon resumes after a hard kill, refuses a second instance, and 
   const posts = join(root, "posts.jsonl")
   writeFileSync(fake, fakeOpencode)
   chmodSync(fake, 0o700)
-  const env = { ...process.env, WAKE_HOME: root, WAKE_OPENCODE: fake, FAKE_LOG: posts, OPENCODE_SESSION_ID: "ses_e2eTarget1" }
+  const env = { ...process.env, SKULK_HOME: root, SKULK_OPENCODE: fake, FAKE_LOG: posts, OPENCODE_SESSION_ID: "ses_e2eTarget1" }
   const wake = (...args: string[]) => Bun.spawnSync([process.execPath, cli, ...args], { env })
 
   const created = wake("in", "4s", "--name", "e2e", "--do", "Say hi.")
@@ -53,7 +53,7 @@ test("the real daemon resumes after a hard kill, refuses a second instance, and 
   expect(lines.length).toBe(1)
   const body = JSON.parse(lines[0]!)
   expect(body.delivery).toBe("queue")
-  expect(body.text).toContain("Wake: e2e")
+  expect(body.text).toContain("Skulk: e2e")
   expect(body.text).toContain("Next: Say hi.")
   expect(wake("show", "e2e").stdout.toString()).toMatch(/Status\s+done, timer/)
   expect(existsSync(join(root, "daemon.pid"))).toBe(false)

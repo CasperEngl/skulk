@@ -14,13 +14,13 @@ export function wakeText(watch: Watch, outcome: Outcome, now: number) {
   const lines: string[] = []
   if (outcome === "timer") {
     const late = now - watch.dueAt
-    lines.push(`⏰ Wake: ${watch.name}: timer set ${age} ago for ${formatTime(watch.dueAt)}.`)
-    if (late > 5 * 60_000) lines.push(`Fired ${formatDuration(late)} late (the Mac was asleep or off, or wake was stopped).`)
+    lines.push(`⏰ Skulk: ${watch.name}: timer set ${age} ago for ${formatTime(watch.dueAt)}.`)
+    if (late > 5 * 60_000) lines.push(`Fired ${formatDuration(late)} late (the Mac was asleep or off, or skulk was stopped).`)
   } else {
     const command = watch.command ? clip(displayCommand(watch.command), 200) : undefined
     const condition = describeCondition(watch.condition)
     if (outcome === "met") {
-      lines.push(`👀 Wake: ${watch.name}: condition met after ${age} (${watch.checks} checks).`)
+      lines.push(`👀 Skulk: ${watch.name}: condition met after ${age} (${watch.checks} checks).`)
       if (watch.condition?.type === "succeeds") {
         lines.push("The command now exits 0.")
         if (watch.lastValue) lines.push(`Output: ${quote(watch.lastValue)}`)
@@ -32,21 +32,21 @@ export function wakeText(watch: Watch, outcome: Outcome, now: number) {
         lines.push(`Changed: ${quote(watch.previousValue)} → ${quote(watch.lastValue ?? "")}`)
       else lines.push(`Value: ${quote(watch.lastValue ?? "")}`)
     } else if (outcome === "expired") {
-      lines.push(`⌛ Wake: ${watch.name}: deadline reached after ${age}; the condition (${condition}) never held.`)
+      lines.push(`⌛ Skulk: ${watch.name}: deadline reached after ${age}; the condition (${condition}) never held.`)
       if (watch.lastValue !== undefined) lines.push(`Last value: ${quote(watch.lastValue)}`)
     } else {
       lines.push(
-        `⚠️ Wake: ${watch.name}: stopped after ${watch.consecutiveFailures === 1 ? "a failed check" : `${watch.consecutiveFailures} consecutive failed checks`} (${condition}).`,
+        `⚠️ Skulk: ${watch.name}: stopped after ${watch.consecutiveFailures === 1 ? "a failed check" : `${watch.consecutiveFailures} consecutive failed checks`} (${condition}).`,
       )
       if (watch.lastError) lines.push(`Last error: ${quote(watch.lastError)}`)
     }
     lines.push(command === undefined ? `Condition: ${condition}` : `Command: \`${command}\``)
     if (outcome === "met" && watch.slot)
       lines.push(
-        `Slot: you hold a place in \`${watch.slot}\` until ${formatTime(watch.holdExpiresAt ?? now)}. Run \`wake release ${watch.id}\` as soon as the heavy work ends; it is also released when this session goes idle.`,
+        `Slot: you hold a place in \`${watch.slot}\` until ${formatTime(watch.holdExpiresAt ?? now)}. Run \`skulk release ${watch.id}\` as soon as the heavy work ends; it is also released when this session goes idle.`,
       )
   }
   lines.push(`${outcome === "met" || outcome === "timer" ? "Next" : "Originally asked"}: ${clip(watch.instruction, 1500)}`)
-  lines.push(`Inspect: \`wake show ${watch.id}\` · \`wake logs ${watch.id}\``)
+  lines.push(`Inspect: \`skulk show ${watch.id}\` · \`skulk logs ${watch.id}\``)
   return lines.join("\n")
 }

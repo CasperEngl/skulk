@@ -45,8 +45,8 @@ describe("timers", () => {
     expect(message!.sessionID).toBe(SESSION)
     expect(message!.text).toContain("standup")
     expect(message!.text).toContain("Next: Post the standup notes.")
-    expect(message!.text).toContain(`wake logs ${watch.id}`)
-    expect(message!.metadata).toEqual({ source: "wake", watchID: watch.id, outcome: "timer" })
+    expect(message!.text).toContain(`skulk logs ${watch.id}`)
+    expect(message!.metadata).toEqual({ source: "skulk", watchID: watch.id, outcome: "timer" })
     expect(h.get(watch.id).status).toBe("done")
   })
 

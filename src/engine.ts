@@ -32,7 +32,7 @@ export interface EngineDeps {
   readonly builtin?: BuiltinDeps
   /** Called whenever one watch's work settles, so a scheduler can recompute its next wake-up. */
   readonly onSettle?: () => void
-  /** Whether `wake poll` and `wake when exits` commands may run (default true; WAKE_ALLOW_EXEC=0 disables). */
+  /** Whether `skulk poll` and `skulk when exits` commands may run (default true; SKULK_ALLOW_EXEC=0 disables). */
   readonly allowExec?: boolean
   /** Whether a foreground waiter's process is still running. */
   readonly processAlive?: (pid: number) => boolean
@@ -136,7 +136,7 @@ export class Engine {
       }
   }
 
-  /** Cancels foreground waits whose `wake` process has gone, so they neither hold a queue place nor a slot. */
+  /** Cancels foreground waits whose `skulk` process has gone, so they neither hold a queue place nor a slot. */
   private cancelOrphans(now: number) {
     const alive = this.deps.processAlive ?? processAlive
     for (const watch of this.deps.store.open()) {
@@ -202,7 +202,7 @@ export class Engine {
     if (watch.kind === "timer") return this.fire(watch, "timer")
     if (this.deps.now() >= watch.deadlineAt) return this.fire(watch, "expired")
     if (runsCommand(watch) && this.deps.allowExec === false) {
-      const error = "this daemon does not run commands (WAKE_ALLOW_EXEC=0); use a built-in condition or a timer"
+      const error = "this daemon does not run commands (SKULK_ALLOW_EXEC=0); use a built-in condition or a timer"
       this.log(watch.id, error)
       return this.fire({ ...watch, consecutiveFailures: 1, lastError: error }, "failed")
     }
@@ -305,7 +305,7 @@ export class Engine {
       sessionID: watch.sessionID,
       messageID: watch.wakeMessageID!,
       text: watch.wakeText!,
-      metadata: { source: "wake", watchID: watch.id, outcome: watch.outcome ?? "" },
+      metadata: { source: "skulk", watchID: watch.id, outcome: watch.outcome ?? "" },
     })
     const now = this.deps.now()
     const attempts = watch.deliveryAttempts + 1

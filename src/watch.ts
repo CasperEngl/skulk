@@ -1,3 +1,5 @@
+import { env } from "./env.ts"
+
 export type Condition =
   | { readonly type: "changes"; readonly from?: string }
   | { readonly type: "equals"; readonly value: string }
@@ -93,7 +95,7 @@ export interface Watch {
   endedAt?: number
   /** Foreground wait only: resolve in SQLite without queueing an OpenCode session prompt. */
   noDeliver?: boolean
-  /** Foreground wait only: the waiting `wake` process. If it dies, the watch is cancelled and its slot released. */
+  /** Foreground wait only: the waiting `skulk` process. If it dies, the watch is cancelled and its slot released. */
   ownerPID?: number
 }
 
@@ -115,11 +117,11 @@ export const Limits = {
   holdGraceMs: 2 * 60_000,
 } as const
 
-/** Default sizes for slots nobody has resized: `heavy` defaults to 2 (or $WAKE_HEAVY_SLOT_SIZE). */
+/** Default sizes for slots nobody has resized: `heavy` defaults to 2 (or $SKULK_HEAVY_SLOT_SIZE). */
 export const defaultSlotSize = (slot: string) => {
   if (slot !== "heavy") return 1
-  const env = Number(process.env.WAKE_HEAVY_SLOT_SIZE)
-  return Number.isInteger(env) && env >= 1 && env <= 16 ? env : 2
+  const size = Number(env("HEAVY_SLOT_SIZE"))
+  return Number.isInteger(size) && size >= 1 && size <= 16 ? size : 2
 }
 
 export const isOpen = (watch: Watch) => watch.status === "active" || watch.status === "firing"

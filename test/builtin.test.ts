@@ -86,7 +86,7 @@ describe("slots", () => {
     const second = when(h, "arch", capacity(0), { slot: "heavy" })
     await step(h)
     expect([...h.server.messages.values()].map((message) => message.metadata.watchID)).toEqual([first.id])
-    expect(h.server.texts[0]).toContain(`wake release ${first.id}`)
+    expect(h.server.texts[0]).toContain(`skulk release ${first.id}`)
     expect(h.get(second.id).lastValue).toContain("slot heavy full (1/1)")
     h.store.release(first.id)
     await step(h)

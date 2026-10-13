@@ -116,10 +116,10 @@ export function whenWatch(
     if (!(condition.diskGB >= 0)) throw new Error("--disk must be a number of GB")
   }
   if (condition.type === "idle") {
-    if (condition.sessions.length === 0) throw new Error("name the sessions to wait for: wake when idle ses_… [ses_…]")
+    if (condition.sessions.length === 0) throw new Error("name the sessions to wait for: skulk when idle ses_… [ses_…]")
     for (const session of condition.sessions) if (!/^ses_[A-Za-z0-9]+$/.test(session)) throw new Error(`not a session ID: ${session}`)
   }
-  if (condition.type === "done" && condition.watches.length === 0) throw new Error("name the watches to wait for: wake when done <id|name>…")
+  if (condition.type === "done" && condition.watches.length === 0) throw new Error("name the watches to wait for: skulk when done <id|name>…")
   if (condition.type === "gh-run") {
     if (!repoPattern.test(condition.repo)) throw new Error("--repo must be OWNER/REPO")
     const modes = [condition.runID !== undefined, condition.sha !== undefined, condition.pr !== undefined].filter(Boolean).length

@@ -10,7 +10,7 @@ import type { Watch } from "../src/watch.ts"
 export const SESSION = "ses_testTarget123"
 
 export function tempRoot() {
-  return ensureStateDirectory(mkdtempSync(join(tmpdir(), "wake-test-")))
+  return ensureStateDirectory(mkdtempSync(join(tmpdir(), "skulk-test-")))
 }
 
 /** Behaves like OpenCode's inbox: the first admission of a message ID wins, retries are no-ops. */

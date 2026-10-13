@@ -75,7 +75,7 @@ describe("guardrails", () => {
     const root = tempRoot()
     new Store(root)
     expect(statSync(root).mode & 0o777).toBe(0o700)
-    expect(statSync(join(root, "wake.db")).mode & 0o777).toBe(0o600)
+    expect(statSync(join(root, "skulk.db")).mode & 0o777).toBe(0o600)
   })
 })
 

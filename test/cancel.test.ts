@@ -113,7 +113,7 @@ describe("concurrency", () => {
   })
 })
 
-describe("WAKE_ALLOW_EXEC=0", () => {
+describe("SKULK_ALLOW_EXEC=0", () => {
   test("command watches fail with a clear error instead of running", async () => {
     const h = new Harness()
     Object.assign(h.options, { allowExec: false })
@@ -122,6 +122,6 @@ describe("WAKE_ALLOW_EXEC=0", () => {
     await h.tick()
     expect(h.runs.length).toBe(0)
     expect(h.get(watch.id).status).toBe("failed")
-    expect(h.server.texts[0]).toContain("WAKE_ALLOW_EXEC=0")
+    expect(h.server.texts[0]).toContain("SKULK_ALLOW_EXEC=0")
   })
 })

@@ -2,6 +2,7 @@ import type { BuiltinDeps } from "./builtin.ts"
 import type { RunResult } from "./condition.ts"
 import type { Delivery, DeliveryResult } from "./engine.ts"
 import type { Store } from "./store.ts"
+import { env } from "./env.ts"
 import { Limits, type Watch } from "./watch.ts"
 
 const maxOutput = 64 * 1024
@@ -86,10 +87,10 @@ export const runWatch = (watch: Watch, signal?: AbortSignal) =>
     signal,
   })
 
-/** `WAKE_ALLOW_EXEC=0` stops the daemon from running `wake poll` / `wake when exits` commands. */
-export const allowExec = () => !["0", "false", "no"].includes((process.env.WAKE_ALLOW_EXEC ?? "").toLowerCase())
+/** `SKULK_ALLOW_EXEC=0` stops the daemon from running `skulk poll` / `skulk when exits` commands. */
+export const allowExec = () => !["0", "false", "no"].includes((env("ALLOW_EXEC") ?? "").toLowerCase())
 
-export const opencodeBinary = () => process.env.WAKE_OPENCODE ?? "opencode"
+export const opencodeBinary = () => env("OPENCODE") ?? "opencode"
 
 /** `opencode api` uses the same server discovery and credentials as the TUI. */
 export async function opencodeApi(args: readonly string[], timeoutMs = 60_000) {
@@ -146,14 +147,14 @@ export function watchID() {
 }
 
 /** The capacity summary; `mac-sim-lease --status` owns the Mac's capacity signals. */
-export const capacityCommand = () => process.env.WAKE_CAPACITY_COMMAND ?? "mac-sim-lease --status"
+export const capacityCommand = () => env("CAPACITY_COMMAND") ?? "mac-sim-lease --status"
 
 export const probeCapacity = (watch: Watch) =>
   runCommand(["/bin/sh", "-c", capacityCommand()], { path: watch.path, timeoutMs: 60_000 })
 
-export const ghBinary = () => process.env.WAKE_GH ?? "gh"
-export const npmBinary = () => process.env.WAKE_NPM ?? "npm"
-export const launchdLabel = () => process.env.WAKE_LABEL ?? "dev.kitlangton.wake"
+export const ghBinary = () => env("GH") ?? "gh"
+export const npmBinary = () => env("NPM") ?? "npm"
+export const launchdLabel = () => env("LABEL") ?? "dev.kitlangton.skulk"
 
 export const runProbe = (argv: readonly string[], watch: Watch) =>
   runCommand(argv, { cwd: watch.cwd, path: watch.path, timeoutMs: watch.timeoutMs ?? 60_000 })

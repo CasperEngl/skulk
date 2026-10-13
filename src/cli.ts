@@ -7,42 +7,44 @@ import { displayCommand } from "./message.ts"
 import { exitsWatch, pollWatch, timerWatch, whenWatch } from "./create.ts"
 import { checkBuiltin, describeCapacity, parseCapacity } from "./builtin.ts"
 import { daemonPID, nudge, runDaemon } from "./daemon.ts"
+import { env } from "./env.ts"
 import { fileLogger, logPath } from "./engine.ts"
-import { Store } from "./store.ts"
+import { legacyStateDirectory, Store } from "./store.ts"
 import { allowExec, builtinDeps, capacityCommand, defaultPath, launchdLabel, probeCapacity, runWatch, sessionExists, watchID } from "./system.ts"
 import { clip, formatDuration, formatTime, parseDuration, parseTime, redact, relative } from "./text.ts"
 import { describeCondition, isEventBuiltin, isOpen, Limits, type Builtin, type Condition, type Watch } from "./watch.ts"
 
-const usage = `wake: wake an OpenCode session at a time, or when an external event or polled condition holds.
+const usage = `skulk: wake an OpenCode session at a time, or when an external event or polled condition holds.
+(\`wake\` is an alias for \`skulk\`.)
 
 Timers
-  wake in <duration> --do <instruction> [--name N] [--session S]
-  wake at <time>     --do <instruction> [--name N] [--session S]
+  skulk in <duration> --do <instruction> [--name N] [--session S]
+  skulk at <time>    --do <instruction> [--name N] [--session S]
       duration: 90s, 20m, 2h30m, 1d     time: 15:30, 3pm, tomorrow 9:00, 2026-10-10 09:00
 
 Built-in conditions (evaluated by the daemon; no probe script to write)
-  wake when gh-run --repo OWNER/REPO (--run ID | --workflow FILE --sha SHA | --pr N [--workflow FILE]) --do <instruction>
+  skulk when gh-run --repo OWNER/REPO (--run ID | --workflow FILE --sha SHA | --pr N [--workflow FILE]) --do <instruction>
       waits for the GitHub Actions run to appear and complete (adaptive 10–15s checks); reports
       the conclusion, failed job names and run URL
-  wake when pr-checks --repo OWNER/REPO --pr N [--required] --do <instruction>
+  skulk when pr-checks --repo OWNER/REPO --pr N [--required] --do <instruction>
       waits for PR checks to finish (default every 15s); reports pass and fail check names
-  wake when npm --package NAME (--tag TAG --changes [--from V] | --newer-than VERSION | --published-after TIME) --do <instruction>
+  skulk when npm --package NAME (--tag TAG --changes [--from V] | --newer-than VERSION | --published-after TIME) --do <instruction>
       waits for an npm version to publish (default every 15s); reports version and publish time
-  wake when exits --do <instruction> [--timeout D] [--deadline D] -- <blocking command...>
+  skulk when exits --do <instruction> [--timeout D] [--deadline D] -- <blocking command...>
       runs a blocking command (e.g. \`gh run watch <id> --exit-status\`), re-runs across daemon
       restarts, and wakes when it exits with the exit code and output tail
-  wake when capacity --do <instruction> [--slot heavy] [--cpu 70] [--builds 1] [--disk 20] [--stable 3m]
+  skulk when capacity --do <instruction> [--slot heavy] [--cpu 70] [--builds 1] [--disk 20] [--stable 3m]
       the Mac has room: 3-minute CPU mean ≤ --cpu %, at most --builds xcodebuilds, ≥ --disk GB free,
-      holding steadily for --stable. Read from \`${capacityCommand()}\` (set $WAKE_CAPACITY_COMMAND).
-  wake when idle <ses_…>... --do <instruction> [--stable 2m]
+      holding steadily for --stable. Read from \`${capacityCommand()}\` (set $SKULK_CAPACITY_COMMAND).
+  skulk when idle <ses_…>... --do <instruction> [--stable 2m]
       every listed OpenCode session has finished its run and stayed idle for --stable
-  wake when done <id|name>... --do <instruction>
+  skulk when done <id|name>... --do <instruction>
       every listed watch has ended (fired, expired, failed or was cancelled)
   Built-in watches take --every (default 15s for gh-run/pr-checks/npm, 1m for capacity/idle/done),
   --deadline, --failures, --no-check, --name and --session.
 
 Polls (one wake when the condition holds, then the watch ends)
-  wake poll --every <duration> <condition> --do <instruction> [options] -- <command...>
+  skulk poll --every <duration> <condition> --do <instruction> [options] -- <command...>
       conditions: --changes [--from VALUE]  output differs from VALUE (or from the first reading)
                   --equals VALUE            output equals VALUE
                   --matches REGEX           output matches REGEX
@@ -58,36 +60,37 @@ Polls (one wake when the condition holds, then the watch ends)
 Slots (one place at a time, first come first served)
   --slot NAME [--hold 2h]          on \`when\` or \`poll\`: once the condition holds, wait for a place in
                                    NAME, then wake. Each grant restarts the other waiters' --stable
-                                   window. The place is held until \`wake release\`, the woken session
+                                   window. The place is held until \`skulk release\`, the woken session
                                    goes idle (after a 2m grace), or --hold expires (max 12h).
-  wake release [id|name|slot]      end a hold (default: every hold of this session)
-  wake slots                       sizes, holders and queues
-  wake slot NAME --size N          places in NAME (default: heavy 2, others 1)
+  skulk release [id|name|slot]     end a hold (default: every hold of this session)
+  skulk slots                      sizes, holders and queues
+  skulk slot NAME --size N         places in NAME (default: heavy 2, others 1)
 
 Foreground waits (no session prompt; for agents that cannot end their turn, e.g. subagents)
   --wait                           on \`in\`, \`at\`, \`when\` or \`poll\`: block until the watch ends and print
                                    its result (exit 1 unless it fired). Without --do nothing is
                                    queued into a session; Ctrl-C cancels the watch.
-  wake wait <id|name>              block until an existing watch ends
-  wake run [--slot heavy] [capacity flags] -- <cmd>
+  skulk wait <id|name>             block until an existing watch ends
+  skulk run [--slot heavy] [capacity flags] -- <cmd>
                                    wait for capacity and a place in the slot, run <cmd> in the
                                    foreground, then release the slot; exits with <cmd>'s code
 
 Manage
-  wake list [--all] [--json]       open watches (--all adds finished ones)
-  wake show <id|name> [--json]
-  wake cancel <id|name>...
-  wake logs <id|name> [-n 50] [--follow]
-  wake status                      daemon state
-  wake daemon                      run the supervisor (launchd runs this)
-  wake launchd [--label L]         print the LaunchAgent plist (honours $WAKE_HOME)
+  skulk list [--all] [--json]      open watches (--all adds finished ones)
+  skulk show <id|name> [--json]
+  skulk cancel <id|name>...
+  skulk logs <id|name> [-n 50] [--follow]
+  skulk status                     daemon state
+  skulk daemon                     run the supervisor (launchd runs this)
+  skulk launchd [--label L]        print the LaunchAgent plist (honours $SKULK_HOME)
 
 The target session defaults to $OPENCODE_SESSION_ID (the calling OpenCode session). Limits: polls at
 most every 60s (15s default for event built-ins), ${Limits.maxActive} open watches, deadlines up to 14 days. State
-and logs live in ${"$"}WAKE_HOME (default ~/.local/state/wake), owner-only.`
+and logs live in ${"$"}SKULK_HOME (default ~/.local/state/skulk), owner-only. SKULK_* variables also accept
+their pre-rename WAKE_* names.`
 
 function fail(message: string): never {
-  console.error(`wake: ${message}`)
+  console.error(`skulk: ${message}`)
   process.exit(1)
 }
 
@@ -153,11 +156,11 @@ if (!verb || flags.help || verb === "help") {
   process.exit(0)
 }
 
-// Only these run a command, so allowlisted subcommands (`wake in`, `wake when gh-run`, …) cannot carry one.
+// Only these run a command, so allowlisted subcommands (`skulk in`, `skulk when gh-run`, …) cannot carry one.
 const runsCommand = verb === "poll" || verb === "run" || (verb === "when" && rest[0] === "exits")
-if (separator !== -1 && !runsCommand) fail(`\`wake ${verb}${verb === "when" && rest[0] ? ` ${rest[0]}` : ""}\` takes no command after --`)
+if (separator !== -1 && !runsCommand) fail(`\`skulk ${verb}${verb === "when" && rest[0] ? ` ${rest[0]}` : ""}\` takes no command after --`)
 if (runsCommand && verb !== "run" && !allowExec())
-  fail("WAKE_ALLOW_EXEC=0: command watches are disabled; use a built-in condition (wake when …) or a timer")
+  fail("SKULK_ALLOW_EXEC=0: command watches are disabled; use a built-in condition (skulk when …) or a timer")
 
 const store = new Store()
 
@@ -168,7 +171,7 @@ function resolveWatch(ref: string | undefined) {
 
 function daemonWarning() {
   return daemonPID(store.root) === undefined
-    ? "\n⚠ the wake daemon is not running, so nothing will fire until it starts (see `wake status`)."
+    ? "\n⚠ the skulk daemon is not running, so nothing will fire until it starts (see `skulk status`)."
     : ""
 }
 
@@ -366,7 +369,7 @@ async function readCapacity(watch: Watch) {
 
 async function createWhen(kind: string | undefined, args: readonly string[]) {
   if (kind === "exits") {
-    if (args.length) fail("pass the blocking command after -- : wake when exits --do <instruction> -- <command...>")
+    if (args.length) fail("pass the blocking command after -- : skulk when exits --do <instruction> -- <command...>")
     const target = await targetSession()
     const watch = parseOr(() =>
       exitsWatch({
@@ -386,7 +389,7 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
   const stableMs = (fallback: string) => parseOr(() => parseDuration(flags.stable ?? fallback))
   let condition: Builtin
   if (kind === "capacity") {
-    if (args.length) fail("wake when capacity takes no arguments")
+    if (args.length) fail("skulk when capacity takes no arguments")
     condition = capacityCondition()
   } else if (kind === "idle") condition = { type: "idle", sessions: [...args], stableMs: flags.stable === "0" ? 0 : stableMs("2m") }
   else if (kind === "done") {
@@ -397,7 +400,7 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
     })
     condition = { type: "done", watches }
   } else if (kind === "gh-run") {
-    if (args.length) fail("wake when gh-run takes flags (--repo, --run, --workflow, --sha, --pr)")
+    if (args.length) fail("skulk when gh-run takes flags (--repo, --run, --workflow, --sha, --pr)")
     const pr = flags.pr !== undefined ? number(flags.pr, 0, "pr") : undefined
     condition = {
       type: "gh-run",
@@ -408,7 +411,7 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
       pr,
     }
   } else if (kind === "pr-checks") {
-    if (args.length) fail("wake when pr-checks takes flags (--repo, --pr, [--required])")
+    if (args.length) fail("skulk when pr-checks takes flags (--repo, --pr, [--required])")
     condition = {
       type: "pr-checks",
       repo: flags.repo ?? "",
@@ -417,7 +420,7 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
     }
   } else if (kind === "npm") {
     const pkg = flags.package ?? args[0] ?? ""
-    if (args.length > (flags.package ? 0 : 1)) fail("wake when npm --package NAME (--tag TAG --changes | --newer-than VERSION | --published-after TIME)")
+    if (args.length > (flags.package ? 0 : 1)) fail("skulk when npm --package NAME (--tag TAG --changes | --newer-than VERSION | --published-after TIME)")
     const modes = [Boolean(flags.changes), flags["newer-than"] !== undefined, flags["published-after"] !== undefined].filter(Boolean).length
     if (modes !== 1) fail("pick one of --changes (with --tag TAG), --newer-than VERSION, or --published-after TIME")
     if (flags.from !== undefined && !flags.changes) fail("--from goes with --changes")
@@ -431,7 +434,7 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
       newerThan: flags["newer-than"],
       publishedAfter,
     }
-  } else fail("wake when capacity|idle|done|gh-run|pr-checks|npm|exits …")
+  } else fail("skulk when capacity|idle|done|gh-run|pr-checks|npm|exits …")
   const target = await targetSession()
   const watch = parseOr(() =>
     whenWatch({
@@ -465,14 +468,14 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
   await created(watch, target.title)
 }
 
-/** `wake run`: wait for capacity and a slot place, run the command here, then release the place. */
+/** `skulk run`: wait for capacity and a slot place, run the command here, then release the place. */
 async function runWithSlot() {
-  if (command.length === 0) fail("give the command to run after -- : wake run [--slot heavy] -- <command...>")
+  if (command.length === 0) fail("give the command to run after -- : skulk run [--slot heavy] -- <command...>")
   const slot = flags.slot ?? "heavy"
   const watch = parseOr(() =>
     whenWatch({
       ...commonInput(flags.session ?? process.env.OPENCODE_SESSION_ID ?? "ses_localrun"),
-      instruction: "(wake run)",
+      instruction: "(skulk run)",
       noDeliver: true,
       condition: capacityCondition(),
       intervalMs: flags.every ? parseDuration(flags.every) : undefined,
@@ -486,12 +489,12 @@ async function runWithSlot() {
   watch.ownerPID = process.pid
   await readCapacity(watch)
   parseOr(() => store.insertChecked(watch, Limits.maxActive))
-  fileLogger(store.root)(watch.id, `created wake run ${watch.name} for ${watch.sessionID} (slot ${slot}): ${clip(displayCommand(normalizeCommand(command)), 500)}`)
+  fileLogger(store.root)(watch.id, `created skulk run ${watch.name} for ${watch.sessionID} (slot ${slot}): ${clip(displayCommand(normalizeCommand(command)), 500)}`)
   nudge(store.root)
-  if (!flags.json) console.error(`wake run: waiting for capacity and a place in ${slot} (${watch.id})${daemonWarning()}`)
+  if (!flags.json) console.error(`skulk run: waiting for capacity and a place in ${slot} (${watch.id})${daemonWarning()}`)
   const granted = await waitForWatch(watch.id, true)
   if (granted.status !== "done") {
-    console.error(granted.wakeText ?? `wake: ${granted.status}`)
+    console.error(granted.wakeText ?? `skulk: ${granted.status}`)
     process.exit(1)
   }
   try {
@@ -506,7 +509,7 @@ async function runWithSlot() {
     process.off("SIGTERM", onTerm)
   } finally {
     if (store.release(watch.id)) {
-      fileLogger(store.root)(watch.id, `released slot ${slot}: wake run finished`)
+      fileLogger(store.root)(watch.id, `released slot ${slot}: skulk run finished`)
       nudge(store.root)
     }
   }
@@ -522,7 +525,7 @@ function release(ref: string | undefined) {
   if (holds.length === 0) return console.log(ref ? `No hold for ${ref}${!watch && session ? " in this session" : ""}.` : "This session holds no slots.")
   for (const hold of holds) {
     if (store.release(hold.watchID)) {
-      fileLogger(store.root)(hold.watchID, `released slot ${hold.slot}: wake release`)
+      fileLogger(store.root)(hold.watchID, `released slot ${hold.slot}: skulk release`)
       console.log(`Released ${hold.slot} (${hold.watchID}).`)
     }
   }
@@ -548,7 +551,7 @@ function slots() {
 }
 
 function resizeSlot(slot: string | undefined) {
-  if (!slot || !/^[\w.:-]{1,32}$/.test(slot)) fail("wake slot NAME --size N")
+  if (!slot || !/^[\w.:-]{1,32}$/.test(slot)) fail("skulk slot NAME --size N")
   const size = Number(flags.size)
   if (!Number.isInteger(size) || size < 1 || size > 16) fail("--size must be 1–16")
   store.setSlotSize(slot, size)
@@ -659,8 +662,10 @@ async function logs(watch: Watch) {
 function status() {
   const pid = daemonPID(store.root)
   const open = store.open()
-  console.log(pid ? `Daemon running (pid ${pid}).` : "Daemon NOT running. Start it with launchd (see README) or `wake daemon`.")
+  console.log(pid ? `Daemon running (pid ${pid}).` : "Daemon NOT running. Start it with launchd (see README) or `skulk daemon`.")
   console.log(`${open.length}/${Limits.maxActive} open watches. State: ${store.root}`)
+  if (store.root === legacyStateDirectory())
+    console.log("Pre-rename state: it moves to ~/.local/state/skulk once the old wake daemon (dev.kitlangton.wake) stops.")
 }
 
 const escapeXml = (value: string) =>
@@ -693,7 +698,7 @@ function plist() {
     <string>${escapeXml(home)}</string>
     <key>PATH</key>
     <string>${escapeXml(path)}</string>
-${process.env.WAKE_HOME ? `    <key>WAKE_HOME</key>\n    <string>${escapeXml(store.root)}</string>\n` : ""}  </dict>
+${env("HOME") ? `    <key>SKULK_HOME</key>\n    <string>${escapeXml(store.root)}</string>\n` : ""}  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -712,10 +717,10 @@ ${process.env.WAKE_HOME ? `    <key>WAKE_HOME</key>\n    <string>${escapeXml(sto
 
 switch (verb) {
   case "in":
-    await createTimer(Date.now() + parseOr(() => parseDuration(rest.join(" ") || fail("wake in <duration>"))))
+    await createTimer(Date.now() + parseOr(() => parseDuration(rest.join(" ") || fail("skulk in <duration>"))))
     break
   case "at":
-    await createTimer(parseOr(() => parseTime(rest.join(" ") || fail("wake at <time>"), Date.now())))
+    await createTimer(parseOr(() => parseTime(rest.join(" ") || fail("skulk at <time>"), Date.now())))
     break
   case "poll":
     await createPoll()

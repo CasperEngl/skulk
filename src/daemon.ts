@@ -1,41 +1,9 @@
-import { chmodSync, closeSync, existsSync, openSync, readFileSync, rmSync, unlinkSync, writeSync } from "node:fs"
+import { chmodSync, closeSync, existsSync, openSync, rmSync, unlinkSync, writeSync } from "node:fs"
 import { join } from "node:path"
 import { Engine, fileLogger, logPath } from "./engine.ts"
-import { Store } from "./store.ts"
+import { daemonPID, pidPath } from "./pid.ts"
+import type { Store } from "./store.ts"
 import { allowExec, builtinDeps, deliverViaOpencode, messageID, runWatch } from "./system.ts"
-
-export const pidPath = (root: string) => join(root, "daemon.pid")
-
-function alive(pid: number) {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
-
-/**
- * After a reboot or crash the PID file can name an unrelated process that reused the PID. Signalling
- * that process with SIGUSR1 would kill it, so check its command line (when `ps` can tell us).
- */
-export function looksLikeDaemon(pid: number) {
-  let result: ReturnType<typeof Bun.spawnSync>
-  try {
-    result = Bun.spawnSync(["ps", "-p", String(pid), "-o", "command="], { stdout: "pipe", stderr: "ignore" })
-  } catch {
-    return true
-  }
-  if (result.exitCode !== 0 && result.exitCode !== 1) return true
-  return /(^|\s)daemon\s*$/.test(String(result.stdout ?? "").trim())
-}
-
-/** The running daemon's PID, if any. */
-export function daemonPID(root: string) {
-  if (!existsSync(pidPath(root))) return undefined
-  const pid = Number(readFileSync(pidPath(root), "utf8").trim())
-  return Number.isInteger(pid) && pid > 0 && alive(pid) && looksLikeDaemon(pid) ? pid : undefined
-}
 
 /** Ask a running daemon to look at the store now (after create or cancel). */
 export function nudge(root: string) {
@@ -64,6 +32,8 @@ function acquireLock(root: string) {
   }
   return false
 }
+
+export { daemonPID, looksLikeDaemon, pidPath } from "./pid.ts"
 
 const stamp = () => new Date().toISOString()
 
@@ -138,7 +108,7 @@ export function startLoop(
 export async function runDaemon(store: Store) {
   const root = store.root
   if (!acquireLock(root)) {
-    console.log(`${stamp()} wake daemon already running (pid ${daemonPID(root)}); exiting`)
+    console.log(`${stamp()} skulk daemon already running (pid ${daemonPID(root)}); exiting`)
     return
   }
   // launchd creates its StandardOutPath before applying the plist's Umask.
@@ -165,7 +135,7 @@ export async function runDaemon(store: Store) {
     process.on(signal, async () => {
       if (stopping) return
       stopping = true
-      console.log(`${stamp()} wake daemon stopping (${signal}); stopping running commands`)
+      console.log(`${stamp()} skulk daemon stopping (${signal}); stopping running commands`)
       loop?.stop()
       // Commands are stopped, not finished: their watches stay active and run again after a restart.
       await engine.stop()
@@ -175,7 +145,7 @@ export async function runDaemon(store: Store) {
   process.on("exit", release)
 
   const open = store.open()
-  console.log(`${stamp()} wake daemon started (pid ${process.pid}, ${open.length} open watches, state ${root}${exec ? "" : ", commands disabled"})`)
+  console.log(`${stamp()} skulk daemon started (pid ${process.pid}, ${open.length} open watches, state ${root}${exec ? "" : ", commands disabled"})`)
   const prune = () => {
     try {
       const count = pruneEnded(store)

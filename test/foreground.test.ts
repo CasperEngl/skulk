@@ -23,13 +23,13 @@ describe("foreground waits in the engine", () => {
     await h.tick()
     expect(h.server.attempts.length).toBe(0)
     expect(h.get(watch.id)).toMatchObject({ status: "done", outcome: "timer" })
-    expect(h.get(watch.id).wakeText).toContain("Wake: fg")
+    expect(h.get(watch.id).wakeText).toContain("Skulk: fg")
   })
 
   test("a granted foreground slot is not released when its session looks idle, only by its owner", async () => {
     const h = new Harness()
     h.capacity = capacityLine(10, 0, 60)
-    const watch = whenWatch({ id: "wk_run", name: "run", sessionID: SESSION, instruction: "(wake run)", now: h.now, condition: capacity, slot: "heavy", noDeliver: true })
+    const watch = whenWatch({ id: "wk_run", name: "run", sessionID: SESSION, instruction: "(skulk run)", now: h.now, condition: capacity, slot: "heavy", noDeliver: true })
     h.store.insert({ ...watch, ownerPID: 4242 })
     await h.tick()
     expect(h.get(watch.id).status).toBe("done")
@@ -73,10 +73,10 @@ function setup() {
   const posts = join(root, "posts.jsonl")
   const env: Record<string, string | undefined> = {
     ...process.env,
-    WAKE_HOME: root,
-    WAKE_OPENCODE: fake,
+    SKULK_HOME: root,
+    SKULK_OPENCODE: fake,
     FAKE_LOG: posts,
-    WAKE_CAPACITY_COMMAND: `echo '{"cpu": 10, "builds": 0, "diskGB": 500}'`,
+    SKULK_CAPACITY_COMMAND: `echo '{"cpu": 10, "builds": 0, "diskGB": 500}'`,
     OPENCODE_SESSION_ID: undefined,
   }
   const cli = join(import.meta.dir, "..", "src", "cli.ts")
@@ -97,7 +97,7 @@ describe("foreground waits from the CLI, against a real daemon", () => {
       await Bun.sleep(300)
       const waiting = await done(wake("in", "2s", "--wait", "--name", "fg-timer"))
       expect(waiting.code).toBe(0)
-      expect(waiting.stdout).toContain("Wake: fg-timer")
+      expect(waiting.stdout).toContain("Skulk: fg-timer")
 
       const later = await done(wake("in", "2s", "--wait", "--name", "fg-other", "--json"))
       expect(JSON.parse(later.stdout)).toMatchObject({ status: "done", noDeliver: true })
@@ -122,7 +122,7 @@ describe("foreground waits from the CLI, against a real daemon", () => {
       const slots = await done(wake("slots", "--json"))
       expect(JSON.parse(slots.stdout)).toContainEqual(expect.objectContaining({ slot: "heavy", holds: [] }))
       const log = await done(wake("logs", "proof"))
-      expect(log.stdout).toContain("released slot heavy: wake run finished")
+      expect(log.stdout).toContain("released slot heavy: skulk run finished")
     } finally {
       daemon.kill("SIGTERM")
       await daemon.exited
@@ -137,12 +137,12 @@ describe("foreground waits from the CLI, against a real daemon", () => {
     expect(result.code).toBe(1)
     expect(result.stderr).toContain("takes no command after --")
     const gh = await done(wake("when", "pr-checks", "--repo", "a/b", "--pr", "1", "--do", "x", "--", "evil"))
-    expect(gh.stderr).toContain("`wake when pr-checks` takes no command after --")
+    expect(gh.stderr).toContain("`skulk when pr-checks` takes no command after --")
     const cli = join(import.meta.dir, "..", "src", "cli.ts")
     const blocked = Bun.spawnSync([process.execPath, cli, "when", "exits", "--session", "ses_x1", "--do", "x", "--", "true"], {
       env: { ...process.env, WAKE_HOME: tempRoot(), WAKE_ALLOW_EXEC: "0" },
     })
     expect(blocked.exitCode).toBe(1)
-    expect(blocked.stderr.toString()).toContain("WAKE_ALLOW_EXEC=0")
+    expect(blocked.stderr.toString()).toContain("SKULK_ALLOW_EXEC=0")
   })
 })
