@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en" data-dither="off">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="robots" content="noindex" />
+    <title>skulk social image</title>
+    <link rel="stylesheet" href="styles.css" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #070707;
+      }
+
+      .card {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        width: 1200px;
+        height: 630px;
+        overflow: hidden;
+      }
+
+      .square .card {
+        height: 1200px;
+      }
+
+      .card .watcher {
+        width: 600px;
+        height: 216px;
+        margin: 0 0 64px;
+      }
+
+      .square .card .watcher {
+        width: 720px;
+        height: 260px;
+        margin-bottom: 120px;
+      }
+
+      .card .eyes-gl {
+        inset: -300px -400px;
+        width: calc(100% + 800px);
+        height: calc(100% + 600px);
+      }
+
+      .card h1 {
+        font-size: 50px;
+        line-height: 1.08;
+        letter-spacing: -0.04em;
+        text-align: center;
+      }
+
+      .square .card h1 {
+        font-size: 68px;
+      }
+
+      .wordmark {
+        position: absolute;
+        left: 56px;
+        bottom: 48px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 26px;
+        font-weight: 600;
+        letter-spacing: -0.03em;
+        color: var(--fg);
+      }
+
+      .square .wordmark {
+        left: 50%;
+        bottom: 72px;
+        transform: translateX(-50%);
+        font-size: 32px;
+      }
+
+      .wordmark svg {
+        width: 30px;
+        height: 11px;
+        fill: #ff2e26;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="watcher" aria-hidden="true">
+        <div class="haze"></div>
+        <svg class="eyes" viewBox="-100 -36 200 72"></svg>
+      </div>
+      <h1>Your agent sleeps.<br /><span>The event wakes it.</span></h1>
+      <div class="wordmark">
+        <svg viewBox="0 0 22 8" aria-hidden="true"><path d="M1 4.6Q4.5 1 8.4 3.4 5 6.2 1 4.6Z" /><path d="M21 4.6Q17.5 1 13.6 3.4 17 6.2 21 4.6Z" /></svg>
+        skulk
+      </div>
+    </div>
+    <script>
+      if (location.search.includes("square")) document.documentElement.classList.add("square")
+    </script>
+    <script type="module">
+      import "./eyes.js"
+      window.__eyesReady.then(() => window.__eyesAt(0.4))
+    </script>
+  </body>
+</html>

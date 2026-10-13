@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>skulk</title>
+    <meta name="description" content="An OpenCode agent schedules a wake-up and ends its turn. A small daemon watches for the event, then queues one message back into the session." />
+    <meta name="theme-color" content="#070707" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="canonical" href="https://skulk.kitlangton.com/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="skulk" />
+    <meta property="og:title" content="skulk: your agent sleeps, the event wakes it" />
+    <meta property="og:description" content="An OpenCode agent schedules a wake-up and ends its turn. A small daemon watches for the event, then queues one message back into the session." />
+    <meta property="og:url" content="https://skulk.kitlangton.com/" />
+    <meta property="og:image" content="https://skulk.kitlangton.com/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Two glowing red eyes in the dark above the line: Your agent sleeps. The event wakes it." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="skulk: your agent sleeps, the event wakes it" />
+    <meta name="twitter:description" content="An OpenCode agent schedules a wake-up and ends its turn. A small daemon watches for the event, then queues one message back into the session." />
+    <meta name="twitter:image" content="https://skulk.kitlangton.com/og.png" />
+    <link rel="preload" href="fonts/geist.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="fonts/geist-mono.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <nav class="nav wrap" aria-label="Main">
+      <a class="brand" href="#top" aria-label="skulk">
+        <svg class="brand-mark" viewBox="0 0 22 8" aria-hidden="true"><path d="M1 4.6Q4.5 1 8.4 3.4 5 6.2 1 4.6Z" /><path d="M21 4.6Q17.5 1 13.6 3.4 17 6.2 21 4.6Z" /></svg>
+        skulk
+      </a>
+      <div class="nav-links">
+        <a href="#how">How it works</a>
+        <a href="#triggers">Triggers</a>
+        <a href="#install">Install</a>
+      </div>
+    </nav>
+
+    <main id="top">
+      <header class="hero wrap">
+        <div class="watcher" aria-hidden="true">
+          <div class="haze"></div>
+          <svg class="eyes" viewBox="-100 -36 200 72"></svg>
+        </div>
+
+        <h1>Your agent sleeps.<br /><span>The event wakes it.</span></h1>
+        <p class="lede">An OpenCode agent schedules a wake&#8209;up and ends its turn. A small daemon watches for the event, then queues one message back into the session.</p>
+
+        <div class="command">
+          <pre><code id="hero-cmd"><span class="t-bin">skulk</span> when pr-checks <span class="t-flag">--repo</span> acme/app <span class="t-flag">--pr</span> 42 <span class="t-flag">--do</span> <span class="t-str">"Fix any failures."</span></code></pre>
+          <button class="copy" type="button" data-copy="hero-cmd" aria-label="Copy command">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.25" y="5.25" width="8" height="8" rx="1.5" /><path d="M10.75 3.25V3a1.75 1.75 0 0 0-1.75-1.75H4A1.75 1.75 0 0 0 2.25 4v5c0 .97.78 1.75 1.75 1.75h.25" /></svg>
+            <svg class="check" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <section class="section wrap" id="how">
+        <h2>How it works</h2>
+
+        <figure class="timeline" aria-label="The session runs skulk and ends its turn, dropping from the awake line into a dim, idle one. While it sleeps, the skulk daemon checks for the event. When the event fires, the session rises back up with one message.">
+          <div class="stage" aria-hidden="true"><svg class="flow"></svg></div>
+          <ol class="steps">
+            <li><b>Watch</b><span>The agent runs <code>skulk</code> and ends its turn.</span></li>
+            <li><b>Wait</b><span>The daemon checks for the event. The session uses no tokens.</span></li>
+            <li><b>Wake</b><span>One message lands in the session with the result.</span></li>
+          </ol>
+        </figure>
+      </section>
+
+      <section class="section wrap" id="triggers">
+        <h2>Triggers</h2>
+
+        <dl class="triggers">
+          <div><dt>in · at</dt><dd>After a duration, or at a time of day</dd></div>
+          <div><dt>when gh-run</dt><dd>A GitHub Actions run completes</dd></div>
+          <div><dt>when pr-checks</dt><dd>Every check on a pull request finishes</dd></div>
+          <div><dt>when npm</dt><dd>A package version is published</dd></div>
+          <div><dt>when exits</dt><dd>A blocking command exits</dd></div>
+          <div><dt>when idle</dt><dd>Other agent sessions finish</dd></div>
+          <div><dt>when capacity</dt><dd>The machine has room for heavy work</dd></div>
+          <div><dt>poll</dt><dd>Any command's output changes, matches or succeeds</dd></div>
+        </dl>
+
+        <pre class="code"><code><span class="t-bin">skulk</span> in 2h <span class="t-flag">--do</span> <span class="t-str">"Check whether the deploy finished."</span>
+
+<span class="t-bin">skulk</span> when npm <span class="t-flag">--package</span> @opencode/client <span class="t-flag">--tag</span> dev <span class="t-flag">--changes</span> \
+  <span class="t-flag">--do</span> <span class="t-str">"Bump to the new dev version."</span>
+
+<span class="t-bin">skulk</span> when idle ses_perf ses_arch <span class="t-flag">--do</span> <span class="t-str">"Both agents are done. Review their branches."</span>
+
+<span class="t-bin">skulk</span> poll <span class="t-flag">--every</span> 2m <span class="t-flag">--succeeds</span> <span class="t-flag">--do</span> <span class="t-str">"Staging is up. Run the smoke tests."</span> \
+  -- curl -fsS https://staging.example.com/health</code></pre>
+      </section>
+
+      <section class="section wrap" id="install">
+        <h2>Install</h2>
+        <p class="note">Needs <a href="https://bun.sh">Bun</a> and <a href="https://opencode.ai">OpenCode</a>. <code>wake</code> still works as an alias.</p>
+        <pre class="code"><code><span class="t-bin">git</span> clone https://github.com/kitlangton/skulk.git
+<span class="t-bin">cd</span> skulk &amp;&amp; <span class="t-bin">bun</span> install &amp;&amp; <span class="t-bin">bun</span> link
+
+<span class="t-bin">skulk</span> launchd &gt; ~/Library/LaunchAgents/dev.kitlangton.skulk.plist
+<span class="t-bin">launchctl</span> bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.kitlangton.skulk.plist
+<span class="t-bin">skulk</span> status</code></pre>
+      </section>
+    </main>
+
+    <footer class="footer wrap">
+      <span>skulk</span>
+      <span>Kit Langton</span>
+    </footer>
+
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

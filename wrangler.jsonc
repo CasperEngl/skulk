@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "skulk-site",
+  "account_id": "19d80aa432b86d110c8e1480cf895f5c",
+  "compatibility_date": "2026-10-13",
+  "assets": {
+    "directory": "./site"
+  },
+  "routes": [{ "pattern": "skulk.kitlangton.com", "custom_domain": true }]
+}

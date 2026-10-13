@@ -28,10 +28,13 @@
   ],
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "deploy": "wrangler deploy"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "typescript": "5.8.2"
-  }
+    "typescript": "5.8.2",
+    "wrangler": "4.150.0"
+  },
+  "homepage": "https://skulk.kitlangton.com"
 }

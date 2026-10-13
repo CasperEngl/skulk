@@ -1,5 +1,7 @@
 # skulk
 
+[skulk.kitlangton.com](https://skulk.kitlangton.com)
+
 Wake an OpenCode session later: at a time, when a built-in trigger completes, or when a polled command's output changes. One small daemon (a `launchd` or `systemd --user` service) owns every watch, persists it in SQLite, and queues exactly one message into the target session through `opencode api`.
 
 ```bash
