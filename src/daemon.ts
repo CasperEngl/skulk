@@ -1,6 +1,6 @@
-import { chmodSync, closeSync, existsSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs"
+import { chmodSync, closeSync, existsSync, openSync, readFileSync, rmSync, unlinkSync, writeSync } from "node:fs"
 import { join } from "node:path"
-import { Engine, fileLogger } from "./engine.ts"
+import { Engine, fileLogger, logPath } from "./engine.ts"
 import { Store } from "./store.ts"
 import { allowExec, builtinDeps, deliverViaOpencode, messageID, runWatch } from "./system.ts"
 
@@ -66,6 +66,15 @@ function acquireLock(root: string) {
 }
 
 const stamp = () => new Date().toISOString()
+
+/** Ended watches and their logs are kept this long, then deleted. */
+export const retentionMs = 30 * 24 * 3600_000
+
+export function pruneEnded(store: Store, now = Date.now()) {
+  const removed = store.prune(now - retentionMs)
+  for (const id of removed) rmSync(logPath(store.root, id), { force: true })
+  return removed.length
+}
 
 export interface Loop {
   /** Look at the store now (a new or cancelled watch, or a check that just finished). */
@@ -167,6 +176,17 @@ export async function runDaemon(store: Store) {
 
   const open = store.open()
   console.log(`${stamp()} wake daemon started (pid ${process.pid}, ${open.length} open watches, state ${root}${exec ? "" : ", commands disabled"})`)
+  const prune = () => {
+    try {
+      const count = pruneEnded(store)
+      if (count > 0) console.log(`${stamp()} pruned ${count} watches that ended over 30 days ago`)
+    } catch (error) {
+      console.error(`${stamp()} prune failed: ${error}`)
+    }
+  }
+  prune()
+  const pruner = setInterval(prune, 6 * 3600_000)
   loop = startLoop(engine)
   await loop.done
+  clearInterval(pruner)
 }

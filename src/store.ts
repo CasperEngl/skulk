@@ -54,7 +54,19 @@ export class Store {
       acquired_at INTEGER NOT NULL,
       expires_at INTEGER NOT NULL
     )`)
+    // Version 1 is the schema above; bump it with a migration when the schema changes.
+    if (this.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version === 0) this.db.exec("PRAGMA user_version = 1")
     chmodSync(join(root, "wake.db"), 0o600)
+  }
+
+  /** Deletes ended watches (and returns their IDs) that ended before `before`. */
+  prune(before: number) {
+    return this.db.transaction(() => {
+      const ended = this.list(["done", "expired", "failed", "cancelled", "undeliverable"]).filter((watch) => (watch.endedAt ?? watch.firedAt ?? watch.createdAt) < before)
+      const remove = this.db.query("DELETE FROM watches WHERE id = ?")
+      for (const watch of ended) remove.run(watch.id)
+      return ended.map((watch) => watch.id)
+    }).immediate()
   }
 
   insert(watch: Watch) {

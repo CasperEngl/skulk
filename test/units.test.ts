@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { statSync } from "node:fs"
+import { existsSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { evaluate } from "../src/condition.ts"
 import { pollWatch, timerWatch } from "../src/create.ts"
+import { pruneEnded } from "../src/daemon.ts"
+import { logPath } from "../src/engine.ts"
 import { Store } from "../src/store.ts"
 import { messageID, runCommand } from "../src/system.ts"
 import { clip, parseDuration, parseTime, redact } from "../src/text.ts"
@@ -128,5 +130,28 @@ describe("runCommand", () => {
   test("a missing program is an error, not a crash", async () => {
     const result = await runCommand(["/nonexistent/program"], { timeoutMs: 1000 })
     expect(result.error ?? result.exitCode).toBeTruthy()
+  })
+})
+
+const day = 24 * 3600_000
+
+describe("retention", () => {
+  test("ended watches and their logs are pruned after 30 days; open ones are kept", () => {
+    const root = tempRoot()
+    const store = new Store(root)
+    const now = Date.now()
+    const old = timerWatch({ id: "wk_old", sessionID: SESSION, instruction: "x", now: now - 40 * day, at: now - 39 * day })
+    const recent = timerWatch({ id: "wk_recent", sessionID: SESSION, instruction: "x", now: now - 2 * day, at: now - day })
+    const open = timerWatch({ id: "wk_open", sessionID: SESSION, instruction: "x", now, at: now + day })
+    store.insert({ ...old, status: "done", endedAt: now - 39 * day })
+    store.insert({ ...recent, status: "done", endedAt: now - day })
+    store.insert(open)
+    writeFileSync(logPath(root, "wk_old"), "log\n")
+    expect(pruneEnded(store, now)).toBe(1)
+    expect(store.get("wk_old")).toBeUndefined()
+    expect(existsSync(logPath(root, "wk_old"))).toBe(false)
+    expect(store.get("wk_recent")).toBeDefined()
+    expect(store.get("wk_open")).toBeDefined()
+    expect(store.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(1)
   })
 })
