@@ -2,7 +2,7 @@ import { chmodSync, closeSync, existsSync, openSync, readFileSync, unlinkSync, w
 import { join } from "node:path"
 import { Engine, fileLogger } from "./engine.ts"
 import { Store } from "./store.ts"
-import { deliverViaOpencode, messageID, probeCapacity, runProbe, runWatch, sessionState } from "./system.ts"
+import { builtinDeps, deliverViaOpencode, messageID, runWatch } from "./system.ts"
 
 export const pidPath = (root: string) => join(root, "daemon.pid")
 
@@ -70,7 +70,7 @@ export async function runDaemon(store: Store) {
     deliver: deliverViaOpencode,
     newMessageID: messageID,
     log: fileLogger(root),
-    builtin: { capacity: probeCapacity, sessionState, watchStatus: (ref) => store.find(ref)?.status, exec: runProbe },
+    builtin: builtinDeps(store),
   })
   let wakeUp: (() => void) | undefined
   let stopping = false

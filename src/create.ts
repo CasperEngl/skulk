@@ -36,6 +36,16 @@ export function timerWatch(input: Common & { readonly at: number }): Watch {
   return { ...base(input), kind: "timer", dueAt: input.at, deadlineAt: input.at }
 }
 
+const repoPattern = /^[\w.-]+\/[\w.-]+$/
+
+function pollBounds(input: { readonly deadlineMs?: number; readonly maxFailures?: number }, defaultFailures: number = Limits.defaultMaxFailures) {
+  const deadlineMs = input.deadlineMs ?? Limits.defaultDeadlineMs
+  if (deadlineMs <= 0 || deadlineMs > Limits.maxDeadlineMs) throw new Error("--deadline must be between 0 and 14d")
+  const maxFailures = input.maxFailures ?? defaultFailures
+  if (!Number.isInteger(maxFailures) || maxFailures < 1 || maxFailures > 100) throw new Error("--failures must be 1–100")
+  return { deadlineMs, maxFailures }
+}
+
 export function pollWatch(
   input: Common & Queueing & {
     readonly command: readonly string[]
@@ -51,12 +61,9 @@ export function pollWatch(
   validateCommon(input)
   if (input.command.length === 0) throw new Error("give the command to poll after --")
   if (input.intervalMs < Limits.minIntervalMs) throw new Error("--every must be at least 60s")
-  const deadlineMs = input.deadlineMs ?? Limits.defaultDeadlineMs
-  if (deadlineMs <= 0 || deadlineMs > Limits.maxDeadlineMs) throw new Error("--deadline must be between 0 and 14d")
+  const { deadlineMs, maxFailures } = pollBounds(input)
   const timeoutMs = input.timeoutMs ?? Math.min(input.intervalMs, Limits.defaultTimeoutMs)
   if (timeoutMs <= 0 || timeoutMs > Limits.maxTimeoutMs) throw new Error("--timeout must be at most 10m")
-  const maxFailures = input.maxFailures ?? Limits.defaultMaxFailures
-  if (!Number.isInteger(maxFailures) || maxFailures < 1 || maxFailures > 100) throw new Error("--failures must be 1–100")
   if (input.condition.type === "matches") new RegExp(input.condition.pattern)
   return {
     ...base(input),
@@ -100,10 +107,7 @@ export function whenWatch(
   const minInterval = event ? Limits.minEventIntervalMs : Limits.minIntervalMs
   const intervalMs = input.intervalMs ?? (event ? Limits.eventIntervalMs : Limits.minIntervalMs)
   if (intervalMs < minInterval) throw new Error(`--every must be at least ${Math.round(minInterval / 1000)}s`)
-  const deadlineMs = input.deadlineMs ?? Limits.defaultDeadlineMs
-  if (deadlineMs <= 0 || deadlineMs > Limits.maxDeadlineMs) throw new Error("--deadline must be between 0 and 14d")
-  const maxFailures = input.maxFailures ?? Limits.defaultMaxFailures
-  if (!Number.isInteger(maxFailures) || maxFailures < 1 || maxFailures > 100) throw new Error("--failures must be 1–100")
+  const { deadlineMs, maxFailures } = pollBounds(input)
   if (condition.type === "capacity") {
     if (!(condition.cpu > 0 && condition.cpu <= 100)) throw new Error("--cpu must be 1–100")
     if (!(Number.isInteger(condition.builds) && condition.builds >= 0)) throw new Error("--builds must be a whole number")
@@ -115,7 +119,7 @@ export function whenWatch(
   }
   if (condition.type === "done" && condition.watches.length === 0) throw new Error("name the watches to wait for: wake when done <id|name>…")
   if (condition.type === "gh-run") {
-    if (!/^[\w.-]+\/[\w.-]+$/.test(condition.repo)) throw new Error("--repo must be OWNER/REPO")
+    if (!repoPattern.test(condition.repo)) throw new Error("--repo must be OWNER/REPO")
     const modes = [condition.runID !== undefined, condition.sha !== undefined, condition.pr !== undefined].filter(Boolean).length
     if (modes !== 1) throw new Error("give one of --run ID, --workflow FILE --sha SHA, or --pr N [--workflow FILE]")
     if (condition.runID !== undefined && (!/^\d+$/.test(condition.runID) || condition.workflow !== undefined))
@@ -128,7 +132,7 @@ export function whenWatch(
       throw new Error("--pr must be a positive PR number")
   }
   if (condition.type === "pr-checks") {
-    if (!/^[\w.-]+\/[\w.-]+$/.test(condition.repo)) throw new Error("--repo must be OWNER/REPO")
+    if (!repoPattern.test(condition.repo)) throw new Error("--repo must be OWNER/REPO")
     if (!Number.isInteger(condition.pr) || condition.pr < 1) throw new Error("--pr must be a positive PR number")
   }
   if (condition.type === "npm") {
@@ -163,12 +167,9 @@ export function exitsWatch(
 ): Watch {
   validateCommon(input)
   if (input.command.length === 0) throw new Error("give the blocking command after --")
-  const deadlineMs = input.deadlineMs ?? Limits.defaultDeadlineMs
-  if (deadlineMs <= 0 || deadlineMs > Limits.maxDeadlineMs) throw new Error("--deadline must be between 0 and 14d")
+  const { deadlineMs, maxFailures } = pollBounds(input, 1)
   const timeoutMs = input.timeoutMs ?? deadlineMs
   if (timeoutMs <= 0 || timeoutMs > Limits.maxDeadlineMs) throw new Error("--timeout must be between 0 and 14d")
-  const maxFailures = input.maxFailures ?? 1
-  if (!Number.isInteger(maxFailures) || maxFailures < 1 || maxFailures > 100) throw new Error("--failures must be 1–100")
   return {
     ...base(input),
     ...queueing(input),
