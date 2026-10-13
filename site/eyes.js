@@ -290,7 +290,14 @@ const dither = document.documentElement.dataset.dither === "off" ? 0 : 1
 const look = { x: 0, y: 0, tx: 0, ty: 0 }
 let render = vector()
 let frozen = null
-const frame = (t, now) => render(state(t), still ? 1 : intensity(now), look)
+const headline = document.querySelector(".headline")
+const frame = (t, now) => {
+  const st = state(t)
+  const glow = still ? 1 : intensity(now)
+  render(st, glow, look)
+  // The rim light on the headline follows the eyes: it breathes with them and goes dark when they close.
+  headline?.style.setProperty("--eye-light", (Math.sqrt(st.o) * (1 + (glow - 1) * 2.5)).toFixed(3))
+}
 
 window.__eyesAt = (p) => {
   frozen = p

@@ -46,15 +46,44 @@
         height: calc(100% + 600px);
       }
 
-      .card h1 {
+      .card h1,
+      .card .rim {
         font-size: 50px;
         line-height: 1.08;
         letter-spacing: -0.04em;
         text-align: center;
       }
 
-      .square .card h1 {
+      .square .card h1,
+      .square .card .rim {
         font-size: 68px;
+      }
+
+      /* Eyes here are 3x the site's (3.6x square), so the light reaches further. */
+      .card .headline {
+        --eye-dx: 159px;
+        --eye-dy: -172px;
+      }
+
+      .square .card .headline {
+        --eye-dx: 191px;
+        --eye-dy: -250px;
+      }
+
+      .card .rim {
+        background:
+          radial-gradient(circle at calc(50% - var(--eye-dx)) var(--eye-dy), rgba(255, 46, 32, 0.95), rgba(255, 40, 28, 0.85) 175px, rgba(255, 34, 26, 0.3) 250px, transparent 330px),
+          radial-gradient(circle at calc(50% + var(--eye-dx)) var(--eye-dy), rgba(255, 46, 32, 0.95), rgba(255, 40, 28, 0.85) 175px, rgba(255, 34, 26, 0.3) 250px, transparent 330px);
+        -webkit-background-clip: text;
+        background-clip: text;
+      }
+
+      .square .card .rim {
+        background:
+          radial-gradient(circle at calc(50% - var(--eye-dx)) var(--eye-dy), rgba(255, 46, 32, 0.95), rgba(255, 40, 28, 0.85) 255px, rgba(255, 34, 26, 0.3) 345px, transparent 450px),
+          radial-gradient(circle at calc(50% + var(--eye-dx)) var(--eye-dy), rgba(255, 46, 32, 0.95), rgba(255, 40, 28, 0.85) 255px, rgba(255, 34, 26, 0.3) 345px, transparent 450px);
+        -webkit-background-clip: text;
+        background-clip: text;
       }
 
       .wordmark {
@@ -90,7 +119,25 @@
         <div class="haze"></div>
         <svg class="eyes" viewBox="-100 -36 200 72"></svg>
       </div>
-      <h1>Your agent sleeps.<br /><span>The event wakes it.</span></h1>
+      <div class="headline">
+        <h1>Your agent sleeps.<br /><span>The event wakes it.</span></h1>
+        <div class="rim" aria-hidden="true">Your agent sleeps.<br /><span>The event wakes it.</span></div>
+          <svg class="defs" aria-hidden="true">
+          <filter id="rim-light" x="-5%" y="-20%" width="110%" height="140%" color-interpolation-filters="sRGB">
+            <feOffset in="SourceAlpha" dy="1.5" result="near" />
+            <feComposite in="SourceAlpha" in2="near" operator="out" result="edge" />
+            <feGaussianBlur in="edge" stdDeviation="0.55" result="edgeSoft" />
+            <feComposite in="edgeSoft" in2="SourceAlpha" operator="in" result="edgeIn" />
+            <feOffset in="SourceAlpha" dy="4" result="far" />
+            <feComposite in="SourceAlpha" in2="far" operator="out" result="band" />
+            <feGaussianBlur in="band" stdDeviation="1.3" result="bandSoft" />
+            <feComposite in="bandSoft" in2="SourceAlpha" operator="in" result="bandIn" />
+            <feComponentTransfer in="bandIn" result="bandDim"><feFuncA type="linear" slope="0.1" /></feComponentTransfer>
+            <feMerge result="light"><feMergeNode in="bandDim" /><feMergeNode in="edgeIn" /></feMerge>
+            <feComposite in="SourceGraphic" in2="light" operator="in" />
+          </filter>
+        </svg>
+      </div>
       <div class="wordmark">
         <svg viewBox="0 0 22 8" aria-hidden="true"><path d="M1 4.6Q4.5 1 8.4 3.4 5 6.2 1 4.6Z" /><path d="M21 4.6Q17.5 1 13.6 3.4 17 6.2 21 4.6Z" /></svg>
         skulk

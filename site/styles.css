@@ -155,7 +155,8 @@ pre {
   visibility: hidden;
 }
 
-h1 {
+h1,
+.rim {
   margin: 0;
   font-size: clamp(40px, 6.6vw, 76px);
   font-weight: 600;
@@ -165,6 +166,40 @@ h1 {
 
 h1 span {
   color: var(--faint);
+}
+
+/* The eyes light the top edges of the headline. */
+.headline {
+  --eye-dx: 53px;
+  --eye-dy: -108px;
+  display: grid;
+}
+
+.headline > * {
+  grid-area: 1 / 1;
+}
+
+.rim,
+.rim span {
+  color: transparent;
+}
+
+.rim {
+  background:
+    radial-gradient(circle at calc(50% - var(--eye-dx)) var(--eye-dy), rgba(255, 46, 32, 0.95), rgba(255, 40, 28, 0.8) 1.6em, rgba(255, 34, 26, 0.32) 2.9em, transparent 4.2em),
+    radial-gradient(circle at calc(50% + var(--eye-dx)) var(--eye-dy), rgba(255, 46, 32, 0.95), rgba(255, 40, 28, 0.8) 1.6em, rgba(255, 34, 26, 0.32) 2.9em, transparent 4.2em);
+  -webkit-background-clip: text;
+  background-clip: text;
+  filter: url(#rim-light);
+  opacity: var(--eye-light, 0);
+  pointer-events: none;
+  user-select: none;
+}
+
+.defs {
+  position: absolute;
+  width: 0;
+  height: 0;
 }
 
 .lede {
@@ -466,6 +501,11 @@ h3 + .note {
     width: 180px;
     height: 72px;
     margin-bottom: 48px;
+  }
+
+  .headline {
+    --eye-dx: 48px;
+    --eye-dy: -84px;
   }
 
   .lede {
