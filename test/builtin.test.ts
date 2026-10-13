@@ -416,7 +416,7 @@ describe("wake when npm", () => {
     h.advance(15_000)
     await h.tick()
     expect(h.server.messages.size).toBe(1)
-    expect(h.server.texts[0]).toContain("@opencode/client@0.0.0-dev-20800 (published 2026-10-10T00:20:09.487Z) → @opencode/client@0.0.0-dev-20801 (published 2026-10-10T01:12:45.100Z)")
+    expect(h.server.texts[0]).toContain("@opencode/client@0.0.0-dev-20800 (published 2026-10-10T00:20:09.487Z)` → `@opencode/client@0.0.0-dev-20801 (published 2026-10-10T01:12:45.100Z)")
   })
 
   test("--newer-than handles 0.0.0-dev-* prereleases using publish timestamps", async () => {

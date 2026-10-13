@@ -5,7 +5,10 @@ import { describeCondition, type Outcome, type Watch } from "./watch.ts"
 export const displayCommand = (argv: readonly string[]) =>
   argv.length === 3 && argv[0] === "/bin/sh" && argv[1] === "-c" ? argv[2]! : argv.join(" ")
 
-/** The text queued into the target session. Values are redacted and truncated. */
+/** Observed values come from outside (CLIs, GitHub, npm): quote them so they read as data, not instructions. */
+const quote = (value: string) => `\`${clip(value).replace(/`/g, "'")}\``
+
+/** The text queued into the target session. Values are redacted, truncated and quoted. */
 export function wakeText(watch: Watch, outcome: Outcome, now: number) {
   const age = formatDuration(now - watch.createdAt)
   const lines: string[] = []
@@ -20,22 +23,22 @@ export function wakeText(watch: Watch, outcome: Outcome, now: number) {
       lines.push(`👀 Wake: ${watch.name}: condition met after ${age} (${watch.checks} checks).`)
       if (watch.condition?.type === "succeeds") {
         lines.push("The command now exits 0.")
-        if (watch.lastValue) lines.push(`Output: ${clip(watch.lastValue)}`)
+        if (watch.lastValue) lines.push(`Output: ${quote(watch.lastValue)}`)
       } else if (watch.condition?.type === "exits") {
         lines.push(`The command exited with code ${watch.lastExit ?? 0}.`)
         const tail = (watch.lastValue ?? "").replace(/^exit -?\d+(?::\s*)?/, "")
-        if (tail) lines.push(`Output tail: ${clip(tail)}`)
+        if (tail) lines.push(`Output tail: ${quote(tail)}`)
       } else if (watch.previousValue !== undefined && watch.previousValue !== watch.lastValue)
-        lines.push(`Changed: ${clip(watch.previousValue)} → ${clip(watch.lastValue ?? "")}`)
-      else lines.push(`Value: ${clip(watch.lastValue ?? "")}`)
+        lines.push(`Changed: ${quote(watch.previousValue)} → ${quote(watch.lastValue ?? "")}`)
+      else lines.push(`Value: ${quote(watch.lastValue ?? "")}`)
     } else if (outcome === "expired") {
       lines.push(`⌛ Wake: ${watch.name}: deadline reached after ${age}; the condition (${condition}) never held.`)
-      if (watch.lastValue !== undefined) lines.push(`Last value: ${clip(watch.lastValue)}`)
+      if (watch.lastValue !== undefined) lines.push(`Last value: ${quote(watch.lastValue)}`)
     } else {
       lines.push(
         `⚠️ Wake: ${watch.name}: stopped after ${watch.consecutiveFailures === 1 ? "a failed check" : `${watch.consecutiveFailures} consecutive failed checks`} (${condition}).`,
       )
-      if (watch.lastError) lines.push(`Last error: ${clip(watch.lastError)}`)
+      if (watch.lastError) lines.push(`Last error: ${quote(watch.lastError)}`)
     }
     lines.push(command === undefined ? `Condition: ${condition}` : `Command: \`${command}\``)
     if (outcome === "met" && watch.slot)
