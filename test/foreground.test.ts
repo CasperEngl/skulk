@@ -128,4 +128,21 @@ describe("foreground waits from the CLI, against a real daemon", () => {
       await daemon.exited
     }
   }, 20_000)
+
+  test("verbs that do not run a command refuse one after --", async () => {
+    const { daemon, wake, done } = setup()
+    daemon.kill("SIGTERM")
+    await daemon.exited
+    const result = await done(wake("in", "5m", "--session", "ses_x1", "--do", "hi", "--", "touch", "/tmp/nope"))
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain("takes no command after --")
+    const gh = await done(wake("when", "pr-checks", "--repo", "a/b", "--pr", "1", "--do", "x", "--", "evil"))
+    expect(gh.stderr).toContain("`wake when pr-checks` takes no command after --")
+    const cli = join(import.meta.dir, "..", "src", "cli.ts")
+    const blocked = Bun.spawnSync([process.execPath, cli, "when", "exits", "--session", "ses_x1", "--do", "x", "--", "true"], {
+      env: { ...process.env, WAKE_HOME: tempRoot(), WAKE_ALLOW_EXEC: "0" },
+    })
+    expect(blocked.exitCode).toBe(1)
+    expect(blocked.stderr.toString()).toContain("WAKE_ALLOW_EXEC=0")
+  })
 })

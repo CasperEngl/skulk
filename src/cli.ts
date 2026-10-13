@@ -9,7 +9,7 @@ import { checkBuiltin, describeCapacity, parseCapacity } from "./builtin.ts"
 import { daemonPID, nudge, runDaemon } from "./daemon.ts"
 import { fileLogger, logPath } from "./engine.ts"
 import { Store } from "./store.ts"
-import { builtinDeps, capacityCommand, defaultPath, launchdLabel, probeCapacity, runWatch, sessionExists, watchID } from "./system.ts"
+import { allowExec, builtinDeps, capacityCommand, defaultPath, launchdLabel, probeCapacity, runWatch, sessionExists, watchID } from "./system.ts"
 import { clip, formatDuration, formatTime, parseDuration, parseTime, redact, relative } from "./text.ts"
 import { describeCondition, isEventBuiltin, isOpen, Limits, type Builtin, type Condition, type Watch } from "./watch.ts"
 
@@ -152,6 +152,12 @@ if (!verb || flags.help || verb === "help") {
   console.log(usage)
   process.exit(0)
 }
+
+// Only these run a command, so allowlisted subcommands (`wake in`, `wake when gh-run`, …) cannot carry one.
+const runsCommand = verb === "poll" || verb === "run" || (verb === "when" && rest[0] === "exits")
+if (separator !== -1 && !runsCommand) fail(`\`wake ${verb}${verb === "when" && rest[0] ? ` ${rest[0]}` : ""}\` takes no command after --`)
+if (runsCommand && verb !== "run" && !allowExec())
+  fail("WAKE_ALLOW_EXEC=0: command watches are disabled; use a built-in condition (wake when …) or a timer")
 
 const store = new Store()
 
