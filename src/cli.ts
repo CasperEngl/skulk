@@ -64,6 +64,15 @@ Slots (one place at a time, first come first served)
   wake slots                       sizes, holders and queues
   wake slot NAME --size N          places in NAME (default: heavy 2, others 1)
 
+Foreground waits (no session prompt; for agents that cannot end their turn, e.g. subagents)
+  --wait                           on \`in\`, \`at\`, \`when\` or \`poll\`: block until the watch ends and print
+                                   its result (exit 1 unless it fired). Without --do nothing is
+                                   queued into a session; Ctrl-C cancels the watch.
+  wake wait <id|name>              block until an existing watch ends
+  wake run [--slot heavy] [capacity flags] -- <cmd>
+                                   wait for capacity and a place in the slot, run <cmd> in the
+                                   foreground, then release the slot; exits with <cmd>'s code
+
 Manage
   wake list [--all] [--json]       open watches (--all adds finished ones)
   wake show <id|name> [--json]
@@ -129,6 +138,7 @@ const { values: flags, positionals } = (() => {
         tag: { type: "string" },
         "newer-than": { type: "string" },
         "published-after": { type: "string" },
+        wait: { type: "boolean", short: "W" },
         help: { type: "boolean", short: "h" },
       },
     })
@@ -156,12 +166,51 @@ function daemonWarning() {
     : ""
 }
 
+/** A foreground wait without --do resolves locally and never prompts a session. */
+const noDeliver = () => Boolean(flags.wait && !flags.do)
+
 async function targetSession() {
-  const sessionID = flags.session ?? process.env.OPENCODE_SESSION_ID
-  if (!sessionID) fail("no target session: pass --session ses_… (or run inside OpenCode)")
+  const sessionID = flags.session ?? process.env.OPENCODE_SESSION_ID ?? (noDeliver() ? "ses_localwait" : undefined)
+  if (!sessionID) fail("no target session: pass --session ses_… (or run inside OpenCode, or pass --wait)")
+  if (noDeliver()) return { sessionID, title: undefined }
   const found = await sessionExists(sessionID).catch((error: Error) => fail(error.message))
   if (!found.exists) fail(`session ${sessionID} does not exist`)
   return { sessionID, title: found.title }
+}
+
+/** Blocks until the watch ends. When this process created it, a signal cancels it. */
+async function waitForWatch(watchID: string, cancelOnSignal: boolean): Promise<Watch> {
+  const cleanup = () => {
+    if (cancelOnSignal) {
+      const current = store.get(watchID)
+      if (current && isOpen(current) && store.update({ ...current, status: "cancelled", endedAt: Date.now() }, current.status))
+        fileLogger(store.root)(watchID, "cancelled by signal during --wait")
+      store.release(watchID)
+      nudge(store.root)
+    }
+    process.exit(130)
+  }
+  process.once("SIGINT", cleanup)
+  process.once("SIGTERM", cleanup)
+  try {
+    while (true) {
+      const current = store.get(watchID)
+      if (!current) fail(`watch ${watchID} disappeared`)
+      if (!isOpen(current)) return current
+      await Bun.sleep(waitPollMs)
+    }
+  } finally {
+    process.off("SIGINT", cleanup)
+    process.off("SIGTERM", cleanup)
+  }
+}
+
+const waitPollMs = 500
+
+function printResult(finished: Watch) {
+  if (flags.json) console.log(JSON.stringify(finished, null, 2))
+  else console.log(finished.wakeText ?? finished.lastValue ?? finished.status)
+  if (finished.status !== "done") process.exit(1)
 }
 
 function summary(watch: Watch, title: string | undefined) {
@@ -181,16 +230,23 @@ function summary(watch: Watch, title: string | undefined) {
   return lines.join("\n")
 }
 
-function created(watch: Watch, title: string | undefined) {
-  store.insertChecked(watch, Limits.maxActive)
+async function created(watch: Watch, title: string | undefined) {
+  if (flags.wait) watch.ownerPID = process.pid
+  parseOr(() => store.insertChecked(watch, Limits.maxActive))
   fileLogger(store.root)(
     watch.id,
-    `created ${watch.kind} ${watch.name} for ${watch.sessionID}` +
-      (watch.command ? `: ${clip(displayCommand(watch.command), 500)} ${describeCondition(watch.condition)} every ${formatDuration(watch.intervalMs!)}` : ` at ${new Date(watch.dueAt).toISOString()}`),
+    `created ${watch.kind} ${watch.name} for ${watch.sessionID} by ${watch.createdBy ?? `pid ${process.ppid}`}` +
+      (watch.command
+        ? ` in ${watch.cwd}: ${clip(displayCommand(watch.command), 500)} ${describeCondition(watch.condition)} every ${formatDuration(watch.intervalMs!)}`
+        : ` at ${new Date(watch.dueAt).toISOString()}`),
   )
   if (watch.checks > 0)
     fileLogger(store.root)(watch.id, `check 1 (at creation): exit ${watch.lastExit} value ${clip(watch.lastValue ?? "", 200)}`)
   nudge(store.root)
+  if (flags.wait) {
+    if (!flags.json) console.error(summary(watch, title) + daemonWarning())
+    return printResult(await waitForWatch(watch.id, true))
+  }
   if (flags.json) console.log(JSON.stringify(watch, null, 2))
   else console.log(summary(watch, title) + daemonWarning())
 }
@@ -222,6 +278,7 @@ const commonInput = (sessionID: string, now = Date.now()) => ({
   instruction: flags.do ?? "",
   now,
   createdBy: process.env.OPENCODE_SESSION_ID,
+  noDeliver: noDeliver(),
 })
 
 const timingFlags = () => ({
@@ -233,7 +290,7 @@ const timingFlags = () => ({
 async function createTimer(at: number) {
   const target = await targetSession()
   const watch = parseOr(() => timerWatch({ ...commonInput(target.sessionID), at }))
-  created(watch, target.title)
+  await created(watch, target.title)
 }
 
 async function createPoll() {
@@ -268,7 +325,7 @@ async function createPoll() {
       dueAt: Date.now() + watch.intervalMs!,
     })
   }
-  created(watch, target.title)
+  await created(watch, target.title)
 }
 
 function queueFlags() {
@@ -285,6 +342,22 @@ const number = (flag: string | undefined, fallback: number, name: string) => {
   return value
 }
 
+const capacityCondition = (): Builtin => ({
+  type: "capacity",
+  cpu: number(flags.cpu, 70, "cpu"),
+  builds: number(flags.builds, 1, "builds"),
+  diskGB: number(flags.disk, 20, "disk"),
+  stableMs: flags.stable === "0" ? 0 : parseOr(() => parseDuration(flags.stable ?? "3m")),
+})
+
+/** Refuse a capacity watch whose probe cannot be read, and show the current reading. */
+async function readCapacity(watch: Watch) {
+  const result = await probeCapacity(watch)
+  const capacity = result.exitCode === 0 ? parseCapacity(result.stdout) : undefined
+  if (!capacity) fail(`could not read capacity from \`${capacityCommand()}\` (${clip((result.error ?? result.stderr) || result.stdout, 200)})`)
+  watch.lastValue = describeCapacity(capacity)
+}
+
 async function createWhen(kind: string | undefined, args: readonly string[]) {
   if (kind === "exits") {
     if (args.length) fail("pass the blocking command after -- : wake when exits --do <instruction> -- <command...>")
@@ -299,7 +372,7 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
         ...queueFlags(),
       }),
     )
-    created(watch, target.title)
+    await created(watch, target.title)
     return
   }
 
@@ -308,7 +381,7 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
   let condition: Builtin
   if (kind === "capacity") {
     if (args.length) fail("wake when capacity takes no arguments")
-    condition = { type: "capacity", cpu: number(flags.cpu, 70, "cpu"), builds: number(flags.builds, 1, "builds"), diskGB: number(flags.disk, 20, "disk"), stableMs: flags.stable === "0" ? 0 : stableMs("3m") }
+    condition = capacityCondition()
   } else if (kind === "idle") condition = { type: "idle", sessions: [...args], stableMs: flags.stable === "0" ? 0 : stableMs("2m") }
   else if (kind === "done") {
     const watches = args.map((ref) => {
@@ -365,12 +438,7 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
     }),
   )
   watch.path = process.env.PATH
-  if (condition.type === "capacity") {
-    const result = await probeCapacity(watch)
-    const capacity = result.exitCode === 0 ? parseCapacity(result.stdout) : undefined
-    if (!capacity) fail(`could not read capacity from \`${capacityCommand()}\` (${clip((result.error ?? result.stderr) || result.stdout, 200)})`)
-    watch.lastValue = describeCapacity(capacity)
-  }
+  if (condition.type === "capacity") await readCapacity(watch)
   if (condition.type === "idle")
     for (const session of condition.sessions) {
       const found = await sessionExists(session).catch((error: Error) => fail(error.message))
@@ -388,7 +456,54 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
       watch.dueAt = Date.now() + (initial.nextIntervalMs ?? watch.intervalMs!)
     }
   }
-  created(watch, target.title)
+  await created(watch, target.title)
+}
+
+/** `wake run`: wait for capacity and a slot place, run the command here, then release the place. */
+async function runWithSlot() {
+  if (command.length === 0) fail("give the command to run after -- : wake run [--slot heavy] -- <command...>")
+  const slot = flags.slot ?? "heavy"
+  const watch = parseOr(() =>
+    whenWatch({
+      ...commonInput(flags.session ?? process.env.OPENCODE_SESSION_ID ?? "ses_localrun"),
+      instruction: "(wake run)",
+      noDeliver: true,
+      condition: capacityCondition(),
+      intervalMs: flags.every ? parseDuration(flags.every) : undefined,
+      deadlineMs: flags.deadline ? parseDuration(flags.deadline) : undefined,
+      maxFailures: flags.failures ? Number(flags.failures) : undefined,
+      slot,
+      holdMs: flags.hold ? parseDuration(flags.hold) : undefined,
+    }),
+  )
+  watch.path = process.env.PATH
+  watch.ownerPID = process.pid
+  await readCapacity(watch)
+  parseOr(() => store.insertChecked(watch, Limits.maxActive))
+  fileLogger(store.root)(watch.id, `created wake run ${watch.name} for ${watch.sessionID} (slot ${slot}): ${clip(displayCommand(normalizeCommand(command)), 500)}`)
+  nudge(store.root)
+  if (!flags.json) console.error(`wake run: waiting for capacity and a place in ${slot} (${watch.id})${daemonWarning()}`)
+  const granted = await waitForWatch(watch.id, true)
+  if (granted.status !== "done") {
+    console.error(granted.wakeText ?? `wake: ${granted.status}`)
+    process.exit(1)
+  }
+  try {
+    const child = Bun.spawn(normalizeCommand(command), { cwd: resolve(flags.cwd ?? process.cwd()), stdin: "inherit", stdout: "inherit", stderr: "inherit" })
+    const forward = (signal: NodeJS.Signals) => () => child.kill(signal)
+    const onInt = forward("SIGINT")
+    const onTerm = forward("SIGTERM")
+    process.on("SIGINT", onInt)
+    process.on("SIGTERM", onTerm)
+    process.exitCode = await child.exited
+    process.off("SIGINT", onInt)
+    process.off("SIGTERM", onTerm)
+  } finally {
+    if (store.release(watch.id)) {
+      fileLogger(store.root)(watch.id, `released slot ${slot}: wake run finished`)
+      nudge(store.root)
+    }
+  }
 }
 
 function release(ref: string | undefined) {
@@ -469,8 +584,9 @@ function show(watch: Watch) {
   const lines: [string, string | undefined][] = [
     ["Watch", `${watch.id} (${watch.name})`],
     ["Status", watch.status + (watch.outcome ? `, ${watch.outcome}` : "")],
-    ["Session", watch.sessionID],
+    ["Session", watch.noDeliver ? `${watch.sessionID} (foreground wait; no prompt)` : watch.sessionID],
     ["Created", at(watch.createdAt)],
+    ["Created by", watch.createdBy ?? (watch.ownerPID ? `pid ${watch.ownerPID}` : undefined)],
     ["Instruction", watch.instruction],
   ]
   if (watch.kind === "timer") lines.push(["Fires", at(watch.dueAt)])
@@ -600,6 +716,14 @@ switch (verb) {
     break
   case "when":
     await createWhen(rest[0], rest.slice(1))
+    break
+  case "wait": {
+    const target = resolveWatch(rest[0])
+    printResult(isOpen(target) ? await waitForWatch(target.id, false) : target)
+    break
+  }
+  case "run":
+    await runWithSlot()
     break
   case "release":
     release(rest[0])
