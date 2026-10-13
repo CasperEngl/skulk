@@ -213,6 +213,16 @@ loginctl enable-linger "$USER"   # keep it running when you are logged out
 
 Daemon output goes to `~/.local/state/skulk/daemon.log` on macOS and to `journalctl --user -u skulk` on Linux.
 
+## Agent skill
+
+Teach any coding agent (OpenCode, Claude Code, Codex, Cursor and others) when and how to use skulk instead of sleep-polling:
+
+```bash
+npx skills add kitlangton/skulk
+```
+
+The skill lives in [`skills/skulk/SKILL.md`](skills/skulk/SKILL.md).
+
 ## Configuration
 
 | Variable | Default | Purpose |

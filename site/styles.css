@@ -297,6 +297,22 @@ h2 {
   text-decoration-color: var(--fg);
 }
 
+h3 {
+  margin: 56px 0 12px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+h3 + .note {
+  margin: 0 0 20px;
+}
+
+.section .command {
+  width: fit-content;
+  margin-top: 0;
+}
+
 .code {
   margin: 0;
   padding: 24px 26px;
