@@ -6,10 +6,10 @@ import { tempRoot } from "./helpers.ts"
 const cli = join(import.meta.dir, "..", "src", "cli.ts")
 
 /** Stands in for `opencode api`: records each admitted prompt once per message ID, like OpenCode's inbox. */
-const fakeOpencode = `#!/bin/bash
+const fakeOpencode = `#!/usr/bin/env bash
 if [ "$2" = "get" ]; then echo '{"data":{"title":"Scratch"}}'; exit 0; fi
-id=$(printf '%s' "$5" | /usr/bin/sed -E 's/.*"id":"(msg_[^"]+)".*/\\1/')
-/usr/bin/grep -q "$id" "$FAKE_LOG" 2>/dev/null || printf '%s\\n' "$5" >> "$FAKE_LOG"
+id=$(printf '%s' "$5" | sed -E 's/.*"id":"(msg_[^"]+)".*/\\1/')
+grep -q "$id" "$FAKE_LOG" 2>/dev/null || printf '%s\\n' "$5" >> "$FAKE_LOG"
 `
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))

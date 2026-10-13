@@ -17,7 +17,7 @@ function poll(h: Harness, options: Partial<Parameters<typeof pollWatch>[0]> = {}
     id: "wk_ramp",
     name: "ramp-mac",
     sessionID: SESSION,
-    instruction: "Finish the CyberLynk checkout if approved.",
+    instruction: "Finish the hardware checkout if approved.",
     now: h.now,
     command: ["/bin/sh", "-c", "ramp requests get 01a1 | jq -r .status"],
     condition: { type: "changes", from: "SUBMITTED" },
@@ -74,7 +74,7 @@ describe("polls", () => {
     expect(h.runs.length).toBe(3)
     expect(h.server.messages.size).toBe(1)
     expect(h.server.texts[0]).toContain("Changed: SUBMITTED → APPROVED")
-    expect(h.server.texts[0]).toContain("Next: Finish the CyberLynk checkout if approved.")
+    expect(h.server.texts[0]).toContain("Next: Finish the hardware checkout if approved.")
     h.advance(hour)
     await h.tick()
     expect(h.runs.length).toBe(3)

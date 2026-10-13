@@ -101,8 +101,8 @@ export class Engine {
         const reason =
           hold.expiresAt <= now
             ? "expired"
-            : !watch || watch.status === "cancelled"
-              ? "watch cancelled"
+            : !watch || watch.status === "cancelled" || watch.status === "undeliverable"
+              ? `watch ${watch?.status ?? "removed"}`
               : watch.deliveredAt !== undefined && now - watch.deliveredAt >= Limits.holdGraceMs &&
                   (await this.deps.builtin!.sessionState(hold.sessionID).catch(() => "busy" as const)) !== "busy"
                 ? "session idle"
@@ -218,6 +218,7 @@ export class Engine {
       this.log(watch.id, `delivered to ${watch.sessionID} (attempt ${attempts}); watch ${next.status}`)
     } else if (result.permanent || now - (watch.firedAt ?? now) >= Limits.deliveryWindowMs) {
       next = { ...watch, status: "undeliverable", endedAt: now, deliveryAttempts: attempts, lastDeliveryError: result.error }
+      if (watch.slot && this.deps.store.release(watch.id)) this.log(watch.id, `released slot ${watch.slot}: undeliverable`)
       this.log(watch.id, `could not deliver, giving up: ${clip(result.error)}`)
     } else {
       next = { ...watch, deliveryAttempts: attempts, lastDeliveryError: result.error, nextDeliveryAt: now + deliveryBackoff(attempts) }

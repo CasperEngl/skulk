@@ -1,5 +1,7 @@
+import type { BuiltinDeps } from "./builtin.ts"
 import type { RunResult } from "./condition.ts"
 import type { Delivery, DeliveryResult } from "./engine.ts"
+import type { Store } from "./store.ts"
 import { Limits, type Watch } from "./watch.ts"
 
 const maxOutput = 64 * 1024
@@ -91,8 +93,12 @@ export async function deliverViaOpencode(delivery: Delivery): Promise<DeliveryRe
 export async function sessionExists(sessionID: string) {
   const result = await opencodeApi(["get", `/api/session/${sessionID}`], 30_000)
   if (result.exitCode === 0) {
-    const title = (JSON.parse(result.stdout) as { data?: { title?: string } }).data?.title
-    return { exists: true as const, title }
+    try {
+      const title = (JSON.parse(result.stdout) as { data?: { title?: string } }).data?.title
+      return { exists: true as const, title }
+    } catch {
+      return { exists: true as const, title: undefined }
+    }
   }
   const output = `${result.stdout} ${result.stderr}`
   if (/SessionNotFoundError|HTTP 404/.test(output)) return { exists: false as const }
@@ -126,9 +132,17 @@ export const probeCapacity = (watch: Watch) =>
 
 export const ghBinary = () => process.env.WAKE_GH ?? "gh"
 export const npmBinary = () => process.env.WAKE_NPM ?? "npm"
+export const launchdLabel = () => process.env.WAKE_LABEL ?? "dev.kitlangton.wake"
 
 export const runProbe = (argv: readonly string[], watch: Watch) =>
   runCommand(argv, { cwd: watch.cwd, path: watch.path, timeoutMs: watch.timeoutMs ?? 60_000 })
+
+export const builtinDeps = (store: Store): BuiltinDeps => ({
+  capacity: probeCapacity,
+  sessionState,
+  watchStatus: (ref) => store.find(ref)?.status,
+  exec: runProbe,
+})
 
 /**
  * A session is idle when its last idle time is at or after its last update: OpenCode stamps `time.idle`
@@ -140,6 +154,11 @@ export async function sessionState(sessionID: string): Promise<"idle" | "busy" |
     if (/SessionNotFoundError|HTTP 404/.test(`${result.stdout} ${result.stderr}`)) return "missing"
     throw new Error(`could not read session ${sessionID}: ${(result.error ?? result.stderr).trim().slice(0, 200)}`)
   }
-  const time = (JSON.parse(result.stdout) as { data?: { time?: { updated?: number; idle?: number } } }).data?.time
+  let time: { updated?: number; idle?: number } | undefined
+  try {
+    time = (JSON.parse(result.stdout) as { data?: { time?: { updated?: number; idle?: number } } }).data?.time
+  } catch {
+    throw new Error(`could not parse session ${sessionID} JSON from opencode api`)
+  }
   return time?.idle !== undefined && time.idle >= (time.updated ?? 0) ? "idle" : "busy"
 }

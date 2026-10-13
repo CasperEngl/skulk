@@ -2,9 +2,11 @@ const secretPatterns: readonly RegExp[] = [
   /\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/g,
   /\bgh[pousr]_[A-Za-z0-9]{20,}/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+  /\bnpm_[A-Za-z0-9]{20,}/g,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  /(https?:\/\/)[^:\s/]+:[^@\s/]+@/gi,
   /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]{12,}=*/gi,
   /\b((?:password|passwd|secret|token|api[_-]?key|authorization)["']?\s*[:=]\s*["']?)[^\s"',;)\]}]+/gi,
 ]
@@ -14,7 +16,9 @@ export function redact(text: string) {
   return secretPatterns.reduce(
     (current, pattern) =>
       current.replace(pattern, (match, prefix?: string) =>
-        typeof prefix === "string" && match.startsWith(prefix) && /[:=]/.test(prefix) ? `${prefix}[redacted]` : "[redacted]",
+        typeof prefix === "string" && match.startsWith(prefix) && (/[:=]/.test(prefix) || prefix.endsWith("//"))
+          ? `${prefix}[redacted]${match.endsWith("@") ? "@" : ""}`
+          : "[redacted]",
       ),
     text,
   )

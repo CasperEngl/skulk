@@ -96,6 +96,8 @@ describe("text", () => {
   test("redaction and clipping", () => {
     expect(redact("Authorization: Bearer abcdefghijklmnopqrstuvwxyz")).not.toContain("abcdefghijklmnop")
     expect(redact("ghp_abcdefghijklmnopqrstuvwxyz0123")).toBe("[redacted]")
+    expect(redact("npm_abcdefghijklmnopqrstuvwxyz0123")).toBe("[redacted]")
+    expect(redact("https://user:supersecret@example.com/hook")).toBe("https://[redacted]@example.com/hook")
     expect(redact('{"api_key": "abc123secret"}')).toBe('{"api_key": "[redacted]"}')
     expect(redact("(token=abc123secret) ok")).toBe("(token=[redacted]) ok")
     expect(redact("status APPROVED")).toBe("status APPROVED")
