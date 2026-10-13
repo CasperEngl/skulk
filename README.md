@@ -173,8 +173,14 @@ For unattended agents, allow only the subcommands that cannot run commands, and 
 ## Install
 
 ```bash
+bun add -g @kitlangton/skulk              # puts `skulk` (and its `wake` alias) on PATH (~/.bun/bin)
+```
+
+Or from source:
+
+```bash
 git clone https://github.com/kitlangton/skulk.git
-cd skulk && bun install && bun link       # puts `skulk` (and its `wake` alias) on PATH (~/.bun/bin)
+cd skulk && bun install && bun link
 ```
 
 **macOS (launchd):**

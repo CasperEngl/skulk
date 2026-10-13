@@ -98,9 +98,8 @@
 
       <section class="section wrap" id="install">
         <h2>Install</h2>
-        <p class="note">Needs <a href="https://bun.sh">Bun</a> and <a href="https://opencode.ai">OpenCode</a>. <code>wake</code> still works as an alias.</p>
-        <pre class="code"><code><span class="t-bin">git</span> clone https://github.com/kitlangton/skulk.git
-<span class="t-bin">cd</span> skulk &amp;&amp; <span class="t-bin">bun</span> install &amp;&amp; <span class="t-bin">bun</span> link
+        <p class="note">Needs <a href="https://bun.sh">Bun</a> and <a href="https://opencode.ai">OpenCode</a>. Or build it <a href="https://github.com/kitlangton/skulk#install">from source</a>.</p>
+        <pre class="code"><code><span class="t-bin">bun</span> add -g @kitlangton/skulk
 
 <span class="t-bin">skulk</span> launchd &gt; ~/Library/LaunchAgents/dev.kitlangton.skulk.plist
 <span class="t-bin">launchctl</span> bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.kitlangton.skulk.plist
