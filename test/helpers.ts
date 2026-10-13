@@ -2,7 +2,7 @@ import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { RunResult } from "../src/condition.ts"
-import { Engine, type Delivery, type DeliveryResult } from "../src/engine.ts"
+import { Engine, type Delivery, type DeliveryResult, type EngineDeps } from "../src/engine.ts"
 import { ensureStateDirectory, Store } from "../src/store.ts"
 import { messageID } from "../src/system.ts"
 import type { Watch } from "../src/watch.ts"
@@ -48,6 +48,10 @@ export class Harness {
   /** The capacity summary the probe prints, as `mac-sim-lease --status` would. */
   capacity = capacityLine(50, 0, 60)
   readonly sessions = new Map<string, "idle" | "busy" | "missing">()
+  /** Replaces the scripted results, e.g. to run a real command or hold a check open. */
+  runner: ((watch: Watch, signal?: AbortSignal) => Promise<RunResult>) | undefined
+  readonly deadPIDs = new Set<number>()
+  readonly options: Partial<EngineDeps> = {}
   store: Store
   engine: Engine
 
@@ -60,8 +64,9 @@ export class Harness {
     return new Engine({
       store: this.store,
       now: () => this.now,
-      run: async (watch) => {
+      run: async (watch, signal) => {
         this.runs.push(watch)
+        if (this.runner) return this.runner(watch, signal)
         return this.results.shift() ?? ok("")
       },
       deliver: (delivery) => this.server.deliver(delivery),
@@ -76,6 +81,8 @@ export class Harness {
           return this.probeResults.shift() ?? ok("")
         },
       },
+      processAlive: (pid) => !this.deadPIDs.has(pid),
+      ...this.options,
     })
   }
 

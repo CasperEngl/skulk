@@ -2,7 +2,7 @@ import { chmodSync, closeSync, existsSync, openSync, readFileSync, unlinkSync, w
 import { join } from "node:path"
 import { Engine, fileLogger } from "./engine.ts"
 import { Store } from "./store.ts"
-import { builtinDeps, deliverViaOpencode, messageID, runWatch } from "./system.ts"
+import { allowExec, builtinDeps, deliverViaOpencode, messageID, runWatch } from "./system.ts"
 
 export const pidPath = (root: string) => join(root, "daemon.pid")
 
@@ -15,11 +15,26 @@ function alive(pid: number) {
   }
 }
 
+/**
+ * After a reboot or crash the PID file can name an unrelated process that reused the PID. Signalling
+ * that process with SIGUSR1 would kill it, so check its command line (when `ps` can tell us).
+ */
+export function looksLikeDaemon(pid: number) {
+  let result: ReturnType<typeof Bun.spawnSync>
+  try {
+    result = Bun.spawnSync(["ps", "-p", String(pid), "-o", "command="], { stdout: "pipe", stderr: "ignore" })
+  } catch {
+    return true
+  }
+  if (result.exitCode !== 0 && result.exitCode !== 1) return true
+  return /(^|\s)daemon\s*$/.test(String(result.stdout ?? "").trim())
+}
+
 /** The running daemon's PID, if any. */
 export function daemonPID(root: string) {
   if (!existsSync(pidPath(root))) return undefined
   const pid = Number(readFileSync(pidPath(root), "utf8").trim())
-  return Number.isInteger(pid) && pid > 0 && alive(pid) ? pid : undefined
+  return Number.isInteger(pid) && pid > 0 && alive(pid) && looksLikeDaemon(pid) ? pid : undefined
 }
 
 /** Ask a running daemon to look at the store now (after create or cancel). */
@@ -52,6 +67,65 @@ function acquireLock(root: string) {
 
 const stamp = () => new Date().toISOString()
 
+export interface Loop {
+  /** Look at the store now (a new or cancelled watch, or a check that just finished). */
+  readonly nudge: () => void
+  readonly stop: () => void
+  readonly done: Promise<void>
+}
+
+/**
+ * Ticks the engine whenever the earliest watch is due. Ticks are not awaited, so a slow check never holds
+ * up other watches; instead each settled check nudges the loop, because a watch that was in flight was
+ * invisible to `nextWakeAt()` when the loop last chose how long to sleep.
+ */
+export function startLoop(
+  engine: Engine,
+  options: { readonly minDelayMs?: number; readonly maxDelayMs?: number; readonly minGapMs?: number } = {},
+): Loop {
+  const minDelay = options.minDelayMs ?? 1000
+  const maxDelay = options.maxDelayMs ?? 30_000
+  // Bounds how often nudges can tick, in case a check keeps failing instantly without being rescheduled.
+  const minGap = options.minGapMs ?? 100
+  let lastTick = 0
+  let stopping = false
+  let pending = false
+  let wakeUp: (() => void) | undefined
+  const nudge = () => {
+    pending = true
+    wakeUp?.()
+  }
+  const done = (async () => {
+    while (!stopping) {
+      const gap = Date.now() - lastTick
+      if (gap < minGap) await Bun.sleep(minGap - gap)
+      if (stopping) break
+      lastTick = Date.now()
+      pending = false
+      void engine.tick().catch((error) => console.error(`${stamp()} tick failed: ${error}`))
+      const next = engine.nextWakeAt()
+      const delay = Math.max(minDelay, Math.min(maxDelay, next === undefined ? maxDelay : next - Date.now()))
+      if (pending || stopping) continue
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, delay)
+        wakeUp = () => {
+          clearTimeout(timer)
+          resolve()
+        }
+      })
+      wakeUp = undefined
+    }
+  })()
+  return {
+    nudge,
+    stop: () => {
+      stopping = true
+      wakeUp?.()
+    },
+    done,
+  }
+}
+
 export async function runDaemon(store: Store) {
   const root = store.root
   if (!acquireLock(root)) {
@@ -63,6 +137,8 @@ export async function runDaemon(store: Store) {
   const release = () => {
     if (daemonPID(root) === process.pid) unlinkSync(pidPath(root))
   }
+  let loop: Loop | undefined
+  const exec = allowExec()
   const engine = new Engine({
     store,
     now: Date.now,
@@ -71,32 +147,26 @@ export async function runDaemon(store: Store) {
     newMessageID: messageID,
     log: fileLogger(root),
     builtin: builtinDeps(store),
+    allowExec: exec,
+    onSettle: () => loop?.nudge(),
   })
-  let wakeUp: (() => void) | undefined
+  process.on("SIGUSR1", () => loop?.nudge())
   let stopping = false
-  process.on("SIGUSR1", () => wakeUp?.())
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const)
-    process.on(signal, () => {
+    process.on(signal, async () => {
+      if (stopping) return
       stopping = true
+      console.log(`${stamp()} wake daemon stopping (${signal}); stopping running commands`)
+      loop?.stop()
+      // Commands are stopped, not finished: their watches stay active and run again after a restart.
+      await engine.stop()
       release()
-      console.log(`${stamp()} wake daemon stopping (${signal})`)
       process.exit(0)
     })
   process.on("exit", release)
 
   const open = store.open()
-  console.log(`${stamp()} wake daemon started (pid ${process.pid}, ${open.length} open watches, state ${root})`)
-  while (!stopping) {
-    // Not awaited: a slow check must not hold up other watches' timers.
-    void engine.tick().catch((error) => console.error(`${stamp()} tick failed: ${error}`))
-    const next = engine.nextWakeAt()
-    const delay = Math.max(1000, Math.min(30_000, next === undefined ? 30_000 : next - Date.now()))
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, delay)
-      wakeUp = () => {
-        clearTimeout(timer)
-        resolve()
-      }
-    })
-  }
+  console.log(`${stamp()} wake daemon started (pid ${process.pid}, ${open.length} open watches, state ${root}${exec ? "" : ", commands disabled"})`)
+  loop = startLoop(engine)
+  await loop.done
 }

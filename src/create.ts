@@ -7,24 +7,26 @@ interface Common {
   readonly instruction: string
   readonly now: number
   readonly createdBy?: string
+  readonly noDeliver?: boolean
 }
 
 const base = (input: Common) => ({
   id: input.id,
   name: input.name?.trim() || input.id,
   sessionID: input.sessionID,
-  instruction: input.instruction,
+  instruction: input.instruction.trim() || (input.noDeliver ? "(foreground wait)" : ""),
   createdAt: input.now,
   createdBy: input.createdBy,
   status: "active" as const,
   checks: 0,
   consecutiveFailures: 0,
   deliveryAttempts: 0,
+  ...(input.noDeliver ? { noDeliver: true } : {}),
 })
 
 function validateCommon(input: Common) {
   if (!/^ses_[A-Za-z0-9]+$/.test(input.sessionID)) throw new Error(`not a session ID: ${input.sessionID}`)
-  if (!input.instruction.trim()) throw new Error("say what to do on wake with --do")
+  if (!input.noDeliver && !input.instruction.trim()) throw new Error("say what to do on wake with --do")
   if (input.name !== undefined && !/^[\w.:-]{1,64}$/.test(input.name))
     throw new Error("--name may use letters, digits, . _ : - (max 64)")
 }

@@ -19,14 +19,42 @@ export interface Delivery {
 export interface EngineDeps {
   readonly store: Store
   readonly now: () => number
-  readonly run: (watch: Watch) => Promise<RunResult>
+  /** Runs a watch's command. Aborting the signal must stop the command (its whole process group). */
+  readonly run: (watch: Watch, signal?: AbortSignal) => Promise<RunResult>
   readonly deliver: (delivery: Delivery) => Promise<DeliveryResult>
   readonly newMessageID: (now: number) => string
   readonly log?: (watchID: string, line: string) => void
+  /** Concurrent checks and deliveries, not counting blocking `exits` commands (default 8). */
   readonly maxConcurrent?: number
+  /** Concurrent blocking `exits` commands (default: the open-watch limit, so they never starve checks). */
+  readonly maxBlocking?: number
   /** Probes for built-in conditions and for releasing slot holds. */
   readonly builtin?: BuiltinDeps
+  /** Called whenever one watch's work settles, so a scheduler can recompute its next wake-up. */
+  readonly onSettle?: () => void
+  /** Whether `wake poll` and `wake when exits` commands may run (default true; WAKE_ALLOW_EXEC=0 disables). */
+  readonly allowExec?: boolean
+  /** Whether a foreground waiter's process is still running. */
+  readonly processAlive?: (pid: number) => boolean
 }
+
+interface Running {
+  readonly controller: AbortController
+  readonly blocking: boolean
+  readonly done: Promise<void>
+}
+
+export function processAlive(pid: number) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
+}
+
+const isBlocking = (watch: Watch) => watch.status === "active" && watch.condition?.type === "exits"
+const runsCommand = (watch: Watch) => watch.kind === "poll" && !isBuiltin(watch.condition)
 
 const sweepIntervalMs = 60_000
 
@@ -49,7 +77,7 @@ export function deliveryBackoff(attempt: number) {
  * crash or restart between posting and recording delivery cannot produce a second wake.
  */
 export class Engine {
-  private readonly inFlight = new Set<string>()
+  private readonly inFlight = new Map<string, Running>()
   private sweeping = false
   private lastSweepAt = 0
 
@@ -62,30 +90,74 @@ export class Engine {
   /** Starts work for every due watch not already in progress, and resolves when that work finishes. */
   tick() {
     const now = this.deps.now()
-    const limit = this.deps.maxConcurrent ?? 8
-    const due = this.deps.store
-      .open()
+    this.cancelOrphans(now)
+    const open = this.deps.store.open()
+    this.abortEnded(open)
+    const due = open
       .filter((watch) => !this.inFlight.has(watch.id))
       .filter((watch) =>
         watch.status === "firing" ? (watch.nextDeliveryAt ?? 0) <= now : watch.dueAt <= now || watch.deadlineAt <= now,
       )
       .sort((a, b) => a.dueAt - b.dueAt)
-      .slice(0, Math.max(0, limit - this.inFlight.size))
+    const running = [...this.inFlight.values()]
+    const room = {
+      blocking: (this.deps.maxBlocking ?? Limits.maxActive) - running.filter((entry) => entry.blocking).length,
+      short: (this.deps.maxConcurrent ?? 8) - running.filter((entry) => !entry.blocking).length,
+    }
+    const started = due.filter((watch) => room[isBlocking(watch) ? "blocking" : "short"]-- > 0).map((watch) => this.start(watch))
     const sweep = this.deps.builtin && !this.sweeping && now - this.lastSweepAt >= sweepIntervalMs ? this.sweepHolds(now) : Promise.resolve()
-    return Promise.all([
-      sweep,
-      ...due.map(async (watch) => {
-        this.inFlight.add(watch.id)
-        try {
-          if (watch.status === "firing") await this.deliver(watch)
-          else await this.process(watch)
-        } catch (error) {
-          this.log(watch.id, `internal error: ${clip(String(error))}`)
-        } finally {
-          this.inFlight.delete(watch.id)
-        }
+    return Promise.all([sweep, ...started]).then(() => undefined)
+  }
+
+  private start(watch: Watch) {
+    const controller = new AbortController()
+    const done = (async () => {
+      try {
+        if (watch.status === "firing") await this.deliver(watch)
+        else await this.process(watch, controller.signal)
+      } catch (error) {
+        this.log(watch.id, `internal error: ${clip(String(error))}`)
+      } finally {
+        this.inFlight.delete(watch.id)
+        this.deps.onSettle?.()
+      }
+    })()
+    this.inFlight.set(watch.id, { controller, blocking: isBlocking(watch), done })
+    return done
+  }
+
+  /** Stops commands whose watch was cancelled (or otherwise ended) while they ran. */
+  private abortEnded(open: readonly Watch[]) {
+    const ids = new Set(open.map((watch) => watch.id))
+    for (const [id, entry] of this.inFlight)
+      if (!ids.has(id) && !entry.controller.signal.aborted) {
+        this.log(id, "watch ended while its command ran; stopping the command")
+        entry.controller.abort()
+      }
+  }
+
+  /** Cancels foreground waits whose `wake` process has gone, so they neither hold a queue place nor a slot. */
+  private cancelOrphans(now: number) {
+    const alive = this.deps.processAlive ?? processAlive
+    for (const watch of this.deps.store.open()) {
+      if (watch.ownerPID === undefined || watch.status !== "active" || alive(watch.ownerPID)) continue
+      if (this.deps.store.update({ ...watch, status: "cancelled", endedAt: now }, "active"))
+        this.log(watch.id, `cancelled: waiting process ${watch.ownerPID} exited`)
+    }
+  }
+
+  /** Aborts all running commands and waits (up to `graceMs`) for their work to settle. */
+  async stop(graceMs = 5_000) {
+    const running = [...this.inFlight.values()]
+    for (const entry of running) entry.controller.abort()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      Promise.all(running.map((entry) => entry.done)),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, graceMs)
       }),
-    ]).then(() => undefined)
+    ])
+    clearTimeout(timer)
   }
 
   /**
@@ -103,7 +175,9 @@ export class Engine {
             ? "expired"
             : !watch || watch.status === "cancelled" || watch.status === "undeliverable"
               ? `watch ${watch?.status ?? "removed"}`
-              : watch.deliveredAt !== undefined && now - watch.deliveredAt >= Limits.holdGraceMs &&
+              : watch.ownerPID !== undefined && !(this.deps.processAlive ?? processAlive)(watch.ownerPID)
+                ? `waiting process ${watch.ownerPID} exited`
+                : !watch.noDeliver && watch.deliveredAt !== undefined && now - watch.deliveredAt >= Limits.holdGraceMs &&
                   (await this.deps.builtin!.sessionState(hold.sessionID).catch(() => "busy" as const)) !== "busy"
                 ? "session idle"
                 : undefined
@@ -124,9 +198,14 @@ export class Engine {
     return times.length === 0 ? undefined : Math.min(...times)
   }
 
-  private async process(watch: Watch) {
+  private async process(watch: Watch, signal?: AbortSignal) {
     if (watch.kind === "timer") return this.fire(watch, "timer")
     if (this.deps.now() >= watch.deadlineAt) return this.fire(watch, "expired")
+    if (runsCommand(watch) && this.deps.allowExec === false) {
+      const error = "this daemon does not run commands (WAKE_ALLOW_EXEC=0); use a built-in condition or a timer"
+      this.log(watch.id, error)
+      return this.fire({ ...watch, consecutiveFailures: 1, lastError: error }, "failed")
+    }
     let check: Check
     let exitCode: number | undefined
     let heldSince: number | undefined
@@ -145,7 +224,8 @@ export class Engine {
         condition.type === "exits"
           ? { ...watch, timeoutMs: Math.max(1, Math.min(watch.timeoutMs ?? watch.deadlineAt - start, watch.deadlineAt - start)) }
           : watch
-      const result = await this.deps.run(bounded)
+      const result = await this.deps.run(bounded, signal)
+      if (signal?.aborted) return this.log(watch.id, "command stopped (watch cancelled or daemon stopping); result discarded")
       if (condition.type === "exits" && result.timedOut && this.deps.now() >= watch.deadlineAt) {
         const latest = outputTail(result)
         return this.fire(latest ? { ...watch, lastValue: latest.slice(0, 4000) } : watch, "expired", watch.status)
@@ -185,6 +265,23 @@ export class Engine {
 
   private async fire(watch: Watch, outcome: Outcome, expected: Status = watch.status) {
     const now = this.deps.now()
+    if (watch.noDeliver) {
+      const done: Watch = {
+        ...watch,
+        status: finalStatus[outcome],
+        outcome,
+        firedAt: now,
+        deliveredAt: now,
+        endedAt: now,
+        wakeText: wakeText(watch, outcome, now),
+      }
+      if (!this.deps.store.update(done, expected)) {
+        if (watch.slot) this.deps.store.release(watch.id)
+        return this.log(watch.id, "watch changed before firing; skipped")
+      }
+      this.log(watch.id, `${outcome}: resolved foreground wait (${done.status})`)
+      return
+    }
     const firing: Watch = {
       ...watch,
       status: "firing",

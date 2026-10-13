@@ -91,6 +91,10 @@ export interface Watch {
   lastDeliveryError?: string
   deliveredAt?: number
   endedAt?: number
+  /** Foreground wait only: resolve in SQLite without queueing an OpenCode session prompt. */
+  noDeliver?: boolean
+  /** Foreground wait only: the waiting `wake` process. If it dies, the watch is cancelled and its slot released. */
+  ownerPID?: number
 }
 
 export const Limits = {

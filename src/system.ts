@@ -26,14 +26,19 @@ export function daemonPath(watchPath?: string) {
   return [...new Set(entries)].join(":")
 }
 
+/** After asking a stopped command to exit (SIGTERM), wait this long before SIGKILL. */
+export const killGraceMs = 2_000
+
 /**
- * Runs argv in its own process group, so a timeout kills the whole pipeline. The command inherits this
- * process's environment, with PATH augmented by the watch's PATH and launchd standard directories.
+ * Runs argv in its own process group, so a timeout or abort stops the whole pipeline. The command
+ * inherits this process's environment, with PATH augmented by the watch's PATH and launchd standard
+ * directories. A timeout kills at once; an abort sends SIGTERM, then SIGKILL after `killGraceMs`.
  */
 export async function runCommand(
   argv: readonly string[],
-  options: { readonly cwd?: string; readonly path?: string; readonly timeoutMs: number },
+  options: { readonly cwd?: string; readonly path?: string; readonly timeoutMs: number; readonly signal?: AbortSignal; readonly killGraceMs?: number },
 ): Promise<RunResult> {
+  if (options.signal?.aborted) return { exitCode: null, stdout: "", stderr: "", timedOut: false, error: "aborted" }
   let child: ReturnType<typeof Bun.spawn<"ignore", "pipe", "pipe">>
   try {
     child = Bun.spawn([...argv], {
@@ -47,26 +52,42 @@ export async function runCommand(
   } catch (error) {
     return { exitCode: null, stdout: "", stderr: "", timedOut: false, error: String(error) }
   }
+  const kill = (signal: NodeJS.Signals) => {
+    try {
+      process.kill(-child.pid, signal)
+    } catch {
+      try {
+        child.kill(signal)
+      } catch {}
+    }
+  }
   let timedOut = false
   const timer = setTimeout(() => {
     timedOut = true
-    try {
-      process.kill(-child.pid, "SIGKILL")
-    } catch {
-      child.kill("SIGKILL")
-    }
+    kill("SIGKILL")
   }, options.timeoutMs)
+  // Not cleared when the leader exits: group members that ignored SIGTERM still get SIGKILL.
+  const onAbort = () => {
+    kill("SIGTERM")
+    setTimeout(() => kill("SIGKILL"), options.killGraceMs ?? killGraceMs).unref()
+  }
+  options.signal?.addEventListener("abort", onAbort, { once: true })
   const [stdout, stderr, exitCode] = await Promise.all([readCapped(child.stdout), readCapped(child.stderr), child.exited])
   clearTimeout(timer)
+  options.signal?.removeEventListener("abort", onAbort)
   return { exitCode, stdout, stderr, timedOut }
 }
 
-export const runWatch = (watch: Watch) =>
+export const runWatch = (watch: Watch, signal?: AbortSignal) =>
   runCommand(watch.command ?? [], {
     cwd: watch.cwd,
     path: watch.path,
     timeoutMs: watch.timeoutMs ?? Limits.defaultTimeoutMs,
+    signal,
   })
+
+/** `WAKE_ALLOW_EXEC=0` stops the daemon from running `wake poll` / `wake when exits` commands. */
+export const allowExec = () => !["0", "false", "no"].includes((process.env.WAKE_ALLOW_EXEC ?? "").toLowerCase())
 
 export const opencodeBinary = () => process.env.WAKE_OPENCODE ?? "opencode"
 
