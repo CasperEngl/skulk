@@ -2,13 +2,15 @@
   "name": "wake",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "description": "Durable timers, event triggers, and conditional session wake-ups for OpenCode agents.",
   "type": "module",
   "bin": {
     "wake": "./src/cli.ts"
   },
   "files": [
-    "src"
+    "src",
+    "LICENSE"
   ],
   "engines": {
     "bun": ">=1.2.0"
