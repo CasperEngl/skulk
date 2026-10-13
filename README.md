@@ -1,6 +1,6 @@
 # wake
 
-Wake an OpenCode session later: at a time, or when a polled command's output changes. One small daemon (launchd) owns every watch, persists it in SQLite, and queues exactly one message into the target session through `opencode api`, the same path `~/code/home/bin/routine` uses.
+Wake an OpenCode session later: at a time, when a built-in trigger completes, or when a polled command's output changes. One small daemon (`launchd`) owns every watch, persists it in SQLite, and queues exactly one message into the target session through `opencode api`.
 
 ```bash
 wake in 2h --do "Check whether the deploy finished and report."
@@ -18,15 +18,15 @@ wake when npm --package @opencode/client --tag dev --changes --name opencode-cli
 wake when exits --name gh-watch --do "Inspect the finished run." -- gh run watch 38007696000 --exit-status
 
 # Custom poll when no built-in covers the check
-wake poll --every 5m --changes --from SUBMITTED --name ramp-mac \
-  --do "Ramp request decided: finish the checkout if approved (todo ef10f090)." \
-  -- 'ramp requests get 01a122f9-… --agent | jq -r ".data[0].status"'
+wake poll --every 5m --changes --from PENDING --name deploy-approval \
+  --do "Approval decided: continue the rollout if approved." \
+  -- 'my-deploy-cli status --json | jq -r ".status"'
 
-wake list            # open watches with next check and last value
-wake show ramp-mac   # full state: last check, last value, failures, delivery
-wake logs ramp-mac   # per-check log (-f to follow)
-wake cancel ramp-mac
-wake status          # is the daemon running?
+wake list                    # open watches with next check and last value
+wake show deploy-approval    # full state: last check, last value, failures, delivery
+wake logs deploy-approval    # per-check log (-f to follow)
+wake cancel deploy-approval
+wake status                  # is the daemon running?
 ```
 
 The target session defaults to `$OPENCODE_SESSION_ID`, which OpenCode's shell tool sets to the calling session, so an agent that runs `wake` wakes itself. Pass `--session` to wake another session (for example HOME).
@@ -82,7 +82,7 @@ wake when done perf-proofs --do "Proofs finished; summarize."
 | `pr-checks` | every check on `--repo OWNER/REPO --pr N` (or `--required` checks) has finished (`bucket != pending`). Default every 15s; reports pass and fail check names. |
 | `npm` | `--package NAME` has a new version on `--tag TAG --changes [--from V]`, a version `--newer-than VERSION`, or a version `--published-after TIME`. Default every 15s; reports version and publish time. |
 | `exits` | the blocking command after `--` exits (with any exit code), reporting the exit code and output tail. Re-runs if the daemon restarts while waiting, and respects `--timeout` and `--deadline`. |
-| `capacity` | 3-minute CPU mean ≤ `--cpu` (70), at most `--builds` (1) xcodebuilds, ≥ `--disk` (20) GB free, continuously for `--stable` (3m). Read from `mac-sim-lease --status`, which owns the Mac's capacity signals; override with `$WAKE_CAPACITY_COMMAND`. |
+| `capacity` | 3-minute CPU mean ≤ `--cpu` (70), at most `--builds` (1) xcodebuilds, ≥ `--disk` (20) GB free, continuously for `--stable` (3m). Read from `$WAKE_CAPACITY_COMMAND` (defaults to `mac-sim-lease --status`, or any command printing `{"cpu": 40, "builds": 0, "diskGB": 80}`). |
 | `idle ses_…` | every listed OpenCode session has finished its run (`time.idle ≥ time.updated`) and stayed idle for `--stable` (2m) |
 | `done <watch>…` | every listed watch has ended: fired, expired, failed or cancelled |
 
@@ -106,21 +106,35 @@ An unreadable probe or a missing session is a failed check, never a pass.
 
 ## Security
 
-- Commands run as Kit, in the directory where the watch was created, with the **daemon's** environment (the launchd plist's `HOME` and `PATH`) plus the `PATH` captured when the watch was created. They do not get the creating shell's other variables, so a command that needs a token should fetch it itself (keychain, `op read`, a CLI's own login), not inline it.
+- Commands run as your local user, in the directory where the watch was created, with the **daemon's** environment (the launchd plist's `HOME` and `PATH`) plus the `PATH` captured when the watch was created. They do not get the creating shell's other variables, so a command that needs a token should fetch it itself (keychain, `op read`, a CLI's own login), not inline it.
 - The command is stored in the database so it can run later. Don't put secrets in it.
-- State, the database and logs are owner-only (directory `0700`, files `0600`; the daemon runs with umask `077`). Logs record values and error lines, clipped and passed through best-effort redaction of common token shapes (`Bearer …`, `ghp_…`, `sk-…`, `xox…-…`, JWTs, `token=…`). The environment is never logged.
-- Anyone who can run `wake` can make the daemon run commands as Kit. OpenCode's shell permissions govern agents; the daemon adds no privilege beyond what the creating shell already had.
+- State, the database and logs are owner-only (directory `0700`, files `0600`; the daemon runs with umask `077`). Logs record values and error lines, clipped and passed through best-effort redaction of common token shapes (`Bearer …`, `ghp_…`, `npm_…`, `sk-…`, `xox…-…`, JWTs, URL credentials, `token=…`). The environment is never logged.
+- Anyone who can run `wake poll` or `wake when exits` can make the daemon run commands as your user. If you use OpenCode shell allowlists for unattended agents, allowlist specific safe subcommands (`wake in *`, `wake at *`, `wake when gh-run *`, `wake when pr-checks *`, `wake when npm *`, `wake list*`, `wake show*`, `wake logs*`, `wake cancel*`) rather than a blanket `wake *`.
 
 ## Install
 
 ```bash
-cd ~/code/open-source/wake && bun install && bun link            # puts `wake` on PATH (~/.bun/bin)
+git clone https://github.com/kitlangton/wake.git
+cd wake && bun install && bun link                                # puts `wake` on PATH (~/.bun/bin)
 wake launchd > ~/Library/LaunchAgents/dev.kitlangton.wake.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.kitlangton.wake.plist
 wake status
 ```
 
-Uninstall: `launchctl bootout gui/$(id -u)/dev.kitlangton.wake`, then remove the plist. Daemon output goes to `~/.local/state/wake/daemon.log`. `WAKE_HOME` relocates all state (tests and verification use it); `WAKE_OPENCODE` overrides the `opencode` binary.
+Uninstall: `launchctl bootout gui/$(id -u)/dev.kitlangton.wake`, then remove the plist. Daemon output goes to `~/.local/state/wake/daemon.log`.
+
+## Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OPENCODE_SESSION_ID` | *(set by OpenCode)* | Default target session when `--session` is omitted |
+| `WAKE_HOME` | `~/.local/state/wake` | State directory (`wake.db`, `daemon.pid`, `daemon.log`, `logs/`) |
+| `WAKE_OPENCODE` | `opencode` | Path or name of the `opencode` CLI binary |
+| `WAKE_GH` | `gh` | Path or name of the GitHub CLI binary |
+| `WAKE_NPM` | `npm` | Path or name of the `npm` CLI binary |
+| `WAKE_CAPACITY_COMMAND` | `mac-sim-lease --status` | Command probed by `wake when capacity` |
+| `WAKE_HEAVY_SLOT_SIZE` | `2` | Default concurrency limit for the `heavy` slot |
+| `WAKE_LABEL` | `dev.kitlangton.wake` | Default LaunchAgent label for `wake launchd` |
 
 ## Why a daemon and not an OpenCode plugin
 
@@ -131,7 +145,7 @@ A V2 plugin can register a tool that sees the calling session's ID, and it can p
 - After a server restart, a location's plugins load only when something touches that location again, so pending watches would not resume on their own.
 - Polling inside the shared service also ties watch commands to that service's environment and lifetime, and restarting it to deploy plugin changes interrupts everyone's sessions.
 
-The CLI loses little: `$OPENCODE_SESSION_ID` already gives the creating session, and shell permissions already gate it. A thin plugin that exposes `wake_*` tools by writing to the same database could come later, for agents without shell access. The long-term home is a core scheduling primitive; see Organizer todo `04a7e7ef`.
+The CLI loses little: `$OPENCODE_SESSION_ID` already gives the creating session, and shell permissions already gate it. A thin plugin that exposes `wake_*` tools by writing to the same database could come later, for agents without shell access.
 
 ## Development
 

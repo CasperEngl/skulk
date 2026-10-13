@@ -2,10 +2,27 @@
   "name": "wake",
   "private": true,
   "version": "0.1.0",
+  "description": "Durable timers, event triggers, and conditional session wake-ups for OpenCode agents.",
   "type": "module",
   "bin": {
     "wake": "./src/cli.ts"
   },
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kitlangton/wake.git"
+  },
+  "keywords": [
+    "opencode",
+    "ai-agents",
+    "scheduler",
+    "cli"
+  ],
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit"
