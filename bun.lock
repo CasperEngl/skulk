@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "wake",
+      "name": "@kitlangton/skulk",
       "devDependencies": {
         "@types/bun": "latest",
         "typescript": "5.8.2",
