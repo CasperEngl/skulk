@@ -19,8 +19,21 @@ export interface Capacity {
   readonly diskGB: number
 }
 
-/** Reads the one-line summary printed by `mac-sim-lease --status`. */
+/** Reads the capacity summary from JSON (`{"cpu": 40, "builds": 0, "diskGB": 80}`) or `mac-sim-lease --status`. */
 export function parseCapacity(text: string): Capacity | undefined {
+  const trimmed = text.trim()
+  if (trimmed.startsWith("{")) {
+    try {
+      const json = JSON.parse(trimmed) as { cpu?: number | null; builds?: number; diskGB?: number }
+      if (typeof json.diskGB === "number") {
+        return {
+          cpu: typeof json.cpu === "number" ? json.cpu : undefined,
+          builds: typeof json.builds === "number" ? json.builds : 0,
+          diskGB: json.diskGB,
+        }
+      }
+    } catch {}
+  }
   const cpu = /cpu (\d+)% busy/.exec(text)
   const builds = /xcodebuild (\d+)/.exec(text)
   const disk = /disk (\d+) GB free/.exec(text)
@@ -252,12 +265,15 @@ async function checkNpm(watch: Watch, condition: Extract<Builtin, { readonly typ
   const distTags = data["dist-tags"] ?? {}
   const timeMap = data.time ?? {}
   const formatVer = (version: string) => `${condition.pkg}@${version} (published ${timeMap[version] ?? "unknown"})`
+  const resolveTag = (tag: string): { version?: string; error?: BuiltinCheck } => {
+    const version = distTags[tag]
+    return version ? { version } : { error: { check: { type: "error", error: `dist-tag "${tag}" not found on ${condition.pkg}` } } }
+  }
 
   if (condition.mode === "changes") {
-    const tag = condition.tag ?? "latest"
-    const current = distTags[tag]
-    if (!current) return { check: { type: "error", error: `dist-tag "${tag}" not found on ${condition.pkg}` } }
-    const value = formatVer(current)
+    const { version: current, error } = resolveTag(condition.tag ?? "latest")
+    if (error) return error
+    const value = formatVer(current!)
     const from = condition.from ?? watch.baseline
     if (from === undefined) return { check: { type: "pending", value, baseline: current } }
     return current !== from ? { check: { type: "met", value, from: formatVer(from) } } : { check: { type: "pending", value } }
@@ -265,37 +281,32 @@ async function checkNpm(watch: Watch, condition: Extract<Builtin, { readonly typ
 
   if (condition.mode === "newer-than") {
     const target = condition.newerThan!
+    let candidate: string | undefined
     if (condition.tag) {
-      const current = distTags[condition.tag]
-      if (!current) return { check: { type: "error", error: `dist-tag "${condition.tag}" not found on ${condition.pkg}` } }
-      const value = formatVer(current)
-      return isVersionNewer(current, target, timeMap)
-        ? { check: { type: "met", value, from: formatVer(target) } }
-        : { check: { type: "pending", value } }
+      const resolved = resolveTag(condition.tag)
+      if (resolved.error) return resolved.error
+      candidate = resolved.version
+    } else if (timeMap[target]) {
+      candidate = newestPublishedVersion(timeMap)?.version
+    } else {
+      candidate = distTags.latest ?? data.version ?? newestPublishedVersion(timeMap)?.version
     }
-    if (timeMap[target]) {
-      const newest = newestPublishedVersion(timeMap)
-      if (!newest) return { check: { type: "error", error: `no versions found for ${condition.pkg}` } }
-      const value = formatVer(newest.version)
-      return isVersionNewer(newest.version, target, timeMap)
-        ? { check: { type: "met", value, from: formatVer(target) } }
-        : { check: { type: "pending", value: formatVer(target) } }
-    }
-    const candidate = distTags.latest ?? data.version ?? newestPublishedVersion(timeMap)?.version
     if (!candidate) return { check: { type: "error", error: `no versions found for ${condition.pkg}` } }
     const value = formatVer(candidate)
-    return isVersionNewer(candidate, target, timeMap)
-      ? { check: { type: "met", value, from: `${condition.pkg}@${target}` } }
-      : { check: { type: "pending", value } }
+    if (isVersionNewer(candidate, target, timeMap)) {
+      const from = condition.tag || timeMap[target] ? formatVer(target) : `${condition.pkg}@${target}`
+      return { check: { type: "met", value, from } }
+    }
+    return { check: { type: "pending", value: !condition.tag && timeMap[target] ? formatVer(target) : value } }
   }
 
   const afterMs = condition.publishedAfter!
   if (condition.tag) {
-    const current = distTags[condition.tag]
-    if (!current) return { check: { type: "error", error: `dist-tag "${condition.tag}" not found on ${condition.pkg}` } }
-    const publishedMs = timeMap[current] ? Date.parse(timeMap[current]!) : Number.NaN
+    const { version: current, error } = resolveTag(condition.tag)
+    if (error) return error
+    const publishedMs = timeMap[current!] ? Date.parse(timeMap[current!]!) : Number.NaN
     if (Number.isNaN(publishedMs)) return { check: { type: "error", error: `no publish time for ${condition.pkg}@${current}` } }
-    const value = formatVer(current)
+    const value = formatVer(current!)
     return publishedMs > afterMs ? { check: { type: "met", value } } : { check: { type: "pending", value } }
   }
   const newest = newestPublishedVersion(timeMap)

@@ -9,7 +9,7 @@ import { checkBuiltin, describeCapacity, parseCapacity } from "./builtin.ts"
 import { daemonPID, nudge, runDaemon } from "./daemon.ts"
 import { fileLogger, logPath } from "./engine.ts"
 import { Store } from "./store.ts"
-import { capacityCommand, defaultPath, probeCapacity, runProbe, runWatch, sessionExists, sessionState, watchID } from "./system.ts"
+import { builtinDeps, capacityCommand, defaultPath, launchdLabel, probeCapacity, runWatch, sessionExists, watchID } from "./system.ts"
 import { clip, formatDuration, formatTime, parseDuration, parseTime, redact, relative } from "./text.ts"
 import { describeCondition, isEventBuiltin, isOpen, Limits, type Builtin, type Condition, type Watch } from "./watch.ts"
 
@@ -213,11 +213,26 @@ function parseOr<T>(parse: () => T) {
   }
 }
 
+const normalizeCommand = (args: readonly string[]) => (args.length === 1 ? ["/bin/sh", "-c", args[0]!] : [...args])
+
+const commonInput = (sessionID: string, now = Date.now()) => ({
+  id: watchID(),
+  name: flags.name,
+  sessionID,
+  instruction: flags.do ?? "",
+  now,
+  createdBy: process.env.OPENCODE_SESSION_ID,
+})
+
+const timingFlags = () => ({
+  deadlineMs: flags.deadline ? parseDuration(flags.deadline) : undefined,
+  timeoutMs: flags.timeout ? parseDuration(flags.timeout) : undefined,
+  maxFailures: flags.failures ? Number(flags.failures) : undefined,
+})
+
 async function createTimer(at: number) {
   const target = await targetSession()
-  const watch = parseOr(() =>
-    timerWatch({ id: watchID(), name: flags.name, sessionID: target.sessionID, instruction: flags.do ?? "", now: Date.now(), at, createdBy: process.env.OPENCODE_SESSION_ID }),
-  )
+  const watch = parseOr(() => timerWatch({ ...commonInput(target.sessionID), at }))
   created(watch, target.title)
 }
 
@@ -225,21 +240,13 @@ async function createPoll() {
   if (!flags.every) fail("--every is required")
   const cond = condition()
   const target = await targetSession()
-  const now = Date.now()
   const watch = parseOr(() =>
     pollWatch({
-      id: watchID(),
-      name: flags.name,
-      sessionID: target.sessionID,
-      instruction: flags.do ?? "",
-      now,
-      createdBy: process.env.OPENCODE_SESSION_ID,
-      command: command.length === 1 ? ["/bin/sh", "-c", command[0]!] : command,
+      ...commonInput(target.sessionID),
+      command: normalizeCommand(command),
       condition: cond,
       intervalMs: parseDuration(flags.every!),
-      deadlineMs: flags.deadline ? parseDuration(flags.deadline) : undefined,
-      timeoutMs: flags.timeout ? parseDuration(flags.timeout) : undefined,
-      maxFailures: flags.failures ? Number(flags.failures) : undefined,
+      ...timingFlags(),
       cwd: resolve(flags.cwd ?? process.cwd()),
       path: process.env.PATH,
       ...queueFlags(),
@@ -282,19 +289,11 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
   if (kind === "exits") {
     if (args.length) fail("pass the blocking command after -- : wake when exits --do <instruction> -- <command...>")
     const target = await targetSession()
-    const now = Date.now()
     const watch = parseOr(() =>
       exitsWatch({
-        id: watchID(),
-        name: flags.name,
-        sessionID: target.sessionID,
-        instruction: flags.do ?? "",
-        now,
-        createdBy: process.env.OPENCODE_SESSION_ID,
-        command: command.length === 1 ? ["/bin/sh", "-c", command[0]!] : command,
-        deadlineMs: flags.deadline ? parseDuration(flags.deadline) : undefined,
-        timeoutMs: flags.timeout ? parseDuration(flags.timeout) : undefined,
-        maxFailures: flags.failures ? Number(flags.failures) : undefined,
+        ...commonInput(target.sessionID),
+        command: normalizeCommand(command),
+        ...timingFlags(),
         cwd: resolve(flags.cwd ?? process.cwd()),
         path: process.env.PATH,
         ...queueFlags(),
@@ -357,12 +356,7 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
   const target = await targetSession()
   const watch = parseOr(() =>
     whenWatch({
-      id: watchID(),
-      name: flags.name,
-      sessionID: target.sessionID,
-      instruction: flags.do ?? "",
-      now,
-      createdBy: process.env.OPENCODE_SESSION_ID,
+      ...commonInput(target.sessionID, now),
       condition,
       intervalMs: flags.every ? parseDuration(flags.every) : undefined,
       deadlineMs: flags.deadline ? parseDuration(flags.deadline) : undefined,
@@ -383,12 +377,7 @@ async function createWhen(kind: string | undefined, args: readonly string[]) {
       if (!found.exists) fail(`session ${session} does not exist`)
     }
   if (isEventBuiltin(condition) && !flags["no-check"]) {
-    const initial = await checkBuiltin(
-      watch,
-      condition,
-      { capacity: probeCapacity, sessionState, watchStatus: (ref) => store.find(ref)?.status, exec: runProbe },
-      Date.now(),
-    )
+    const initial = await checkBuiltin(watch, condition, builtinDeps(store), Date.now())
     if (initial.check.type === "error")
       fail(`the first check failed (${clip(initial.check.error)}); fix the arguments, or pass --no-check to start anyway`)
     watch.lastValue = initial.check.value.slice(0, 4000)
@@ -552,33 +541,37 @@ function status() {
   console.log(`${open.length}/${Limits.maxActive} open watches. State: ${store.root}`)
 }
 
+const escapeXml = (value: string) =>
+  value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+
 function plist() {
-  const home = process.env.HOME!
+  const home = process.env.HOME ?? ""
   const bun = process.execPath
   const cli = resolve(import.meta.dir, "cli.ts")
   const path = defaultPath()
   const log = join(store.root, "daemon.log")
+  const label = flags.label ?? launchdLabel()
   console.log(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>${flags.label ?? "dev.kitlangton.wake"}</string>
+  <string>${escapeXml(label)}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${bun}</string>
-    <string>${cli}</string>
+    <string>${escapeXml(bun)}</string>
+    <string>${escapeXml(cli)}</string>
     <string>daemon</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>${home}</string>
+  <string>${escapeXml(home)}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
-    <string>${home}</string>
+    <string>${escapeXml(home)}</string>
     <key>PATH</key>
-    <string>${path}</string>
-${process.env.WAKE_HOME ? `    <key>WAKE_HOME</key>\n    <string>${store.root}</string>\n` : ""}  </dict>
+    <string>${escapeXml(path)}</string>
+${process.env.WAKE_HOME ? `    <key>WAKE_HOME</key>\n    <string>${escapeXml(store.root)}</string>\n` : ""}  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -588,9 +581,9 @@ ${process.env.WAKE_HOME ? `    <key>WAKE_HOME</key>\n    <string>${store.root}</
   <key>Umask</key>
   <integer>63</integer>
   <key>StandardOutPath</key>
-  <string>${log}</string>
+  <string>${escapeXml(log)}</string>
   <key>StandardErrorPath</key>
-  <string>${log}</string>
+  <string>${escapeXml(log)}</string>
 </dict>
 </plist>`)
 }

@@ -23,8 +23,10 @@ async function step(h: Harness, minutes = 1) {
 }
 
 describe("capacity summary", () => {
-  test("parses mac-sim-lease --status", () => {
+  test("parses mac-sim-lease --status and JSON", () => {
     expect(parseCapacity(capacityLine(62, 1, 45))).toEqual({ cpu: 62, builds: 1, diskGB: 45 })
+    expect(parseCapacity('{"cpu": 40, "builds": 2, "diskGB": 80}')).toEqual({ cpu: 40, builds: 2, diskGB: 80 })
+    expect(parseCapacity('{"cpu": 35, "diskGB": 100}')).toEqual({ cpu: 35, builds: 0, diskGB: 100 })
   })
 
   test("a missing CPU sample is unknown, and other text is unreadable", () => {
@@ -131,6 +133,12 @@ describe("slots", () => {
     await step(h)
     expect(h.store.holds("heavy").map((hold) => hold.watchID)).toEqual([second.id])
     await step(h, 11)
+    expect(h.store.holds("heavy")).toHaveLength(0)
+
+    h.server.script = ["missing"]
+    const third = when(h, "third", capacity(0), { slot: "heavy", sessionID: "ses_deleted1" })
+    await step(h)
+    expect(h.get(third.id).status).toBe("undeliverable")
     expect(h.store.holds("heavy")).toHaveLength(0)
   })
 })

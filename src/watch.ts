@@ -32,17 +32,17 @@ export type Condition =
       readonly publishedAfter?: number
     }
 
-export type Builtin = Extract<Condition, { readonly type: "capacity" | "idle" | "done" | "gh-run" | "pr-checks" | "npm" }>
-export const isBuiltin = (condition: Condition | undefined): condition is Builtin =>
-  condition?.type === "capacity" ||
-  condition?.type === "idle" ||
-  condition?.type === "done" ||
-  condition?.type === "gh-run" ||
-  condition?.type === "pr-checks" ||
-  condition?.type === "npm"
+export const eventBuiltinTypes = ["gh-run", "pr-checks", "npm"] as const
+export const builtinTypes = ["capacity", "idle", "done", ...eventBuiltinTypes] as const
 
-export const isEventBuiltin = (condition: Condition | undefined) =>
-  condition?.type === "gh-run" || condition?.type === "pr-checks" || condition?.type === "npm"
+export type EventBuiltin = Extract<Condition, { readonly type: (typeof eventBuiltinTypes)[number] }>
+export type Builtin = Extract<Condition, { readonly type: (typeof builtinTypes)[number] }>
+
+export const isBuiltin = (condition: Condition | undefined): condition is Builtin =>
+  condition !== undefined && (builtinTypes as readonly string[]).includes(condition.type)
+
+export const isEventBuiltin = (condition: Condition | undefined): condition is EventBuiltin =>
+  condition !== undefined && (eventBuiltinTypes as readonly string[]).includes(condition.type)
 
 export type Status = "active" | "firing" | "done" | "expired" | "failed" | "cancelled" | "undeliverable"
 export type Outcome = "met" | "timer" | "expired" | "failed"
@@ -111,8 +111,12 @@ export const Limits = {
   holdGraceMs: 2 * 60_000,
 } as const
 
-/** Default sizes for slots nobody has resized: `heavy` follows the mac-capacity rule of two heavy jobs. */
-export const defaultSlotSize = (slot: string) => (slot === "heavy" ? 2 : 1)
+/** Default sizes for slots nobody has resized: `heavy` defaults to 2 (or $WAKE_HEAVY_SLOT_SIZE). */
+export const defaultSlotSize = (slot: string) => {
+  if (slot !== "heavy") return 1
+  const env = Number(process.env.WAKE_HEAVY_SLOT_SIZE)
+  return Number.isInteger(env) && env >= 1 && env <= 16 ? env : 2
+}
 
 export const isOpen = (watch: Watch) => watch.status === "active" || watch.status === "firing"
 
