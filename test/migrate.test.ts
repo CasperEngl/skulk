@@ -119,6 +119,6 @@ describe("state migration from wake", () => {
     expect((JSON.parse(listed.stdout.toString()) as { id: string }[]).map((watch) => watch.id).sort()).toEqual(["wk_aaaaaaaa", "wk_bbbbbbbb"])
     const pkg = JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf8")) as { name: string; bin: Record<string, string> }
     expect(pkg.name).toBe("@kitlangton/skulk")
-    expect(pkg.bin).toEqual({ skulk: "./src/cli.ts", wake: "./src/cli.ts" })
+    expect(pkg.bin).toEqual({ skulk: "src/cli.ts", wake: "src/cli.ts" })
   })
 })
