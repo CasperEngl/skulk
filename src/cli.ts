@@ -10,7 +10,7 @@ import { daemonPID, nudge, runDaemon } from "./daemon.ts"
 import { env } from "./env.ts"
 import { fileLogger, logPath } from "./engine.ts"
 import { legacyStateDirectory, Store } from "./store.ts"
-import { isWebhook } from "./webhook.ts"
+import { displayTarget, isWebhook } from "./webhook.ts"
 import { allowExec, builtinDeps, capacityCommand, defaultPath, launchdLabel, probeCapacity, runWatch, sessionExists, watchID } from "./system.ts"
 import { clip, formatDuration, formatTime, parseDuration, parseTime, redact, relative } from "./text.ts"
 import { describeCondition, isEventBuiltin, isOpen, Limits, type Builtin, type Condition, type Watch } from "./watch.ts"
@@ -225,7 +225,7 @@ function printResult(finished: Watch) {
 }
 
 function summary(watch: Watch, title: string | undefined) {
-  const target = `${watch.sessionID}${title ? ` (${title})` : ""}`
+  const target = `${displayTarget(watch.sessionID)}${title ? ` (${title})` : ""}`
   if (watch.kind === "timer")
     return `Created ${watch.id} (${watch.name}): wakes ${target} at ${formatTime(watch.dueAt)} (${relative(watch.dueAt, Date.now())}).`
   const action =
@@ -246,7 +246,7 @@ async function created(watch: Watch, title: string | undefined) {
   parseOr(() => store.insertChecked(watch, Limits.maxActive))
   fileLogger(store.root)(
     watch.id,
-    `created ${watch.kind} ${watch.name} for ${watch.sessionID} by ${watch.createdBy ?? `pid ${process.ppid}`}` +
+    `created ${watch.kind} ${watch.name} for ${displayTarget(watch.sessionID)} by ${watch.createdBy ?? `pid ${process.ppid}`}` +
       (watch.command
         ? ` in ${watch.cwd}: ${clip(displayCommand(watch.command), 500)} ${describeCondition(watch.condition)} every ${formatDuration(watch.intervalMs!)}`
         : ` at ${new Date(watch.dueAt).toISOString()}`),
@@ -491,7 +491,7 @@ async function runWithSlot() {
   watch.ownerPID = process.pid
   await readCapacity(watch)
   parseOr(() => store.insertChecked(watch, Limits.maxActive))
-  fileLogger(store.root)(watch.id, `created skulk run ${watch.name} for ${watch.sessionID} (slot ${slot}): ${clip(displayCommand(normalizeCommand(command)), 500)}`)
+  fileLogger(store.root)(watch.id, `created skulk run ${watch.name} for ${displayTarget(watch.sessionID)} (slot ${slot}): ${clip(displayCommand(normalizeCommand(command)), 500)}`)
   nudge(store.root)
   if (!flags.json) console.error(`skulk run: waiting for capacity and a place in ${slot} (${watch.id})${daemonWarning()}`)
   const granted = await waitForWatch(watch.id, true)
@@ -545,10 +545,10 @@ function slots() {
     console.log(`${slot}: ${holds.length}/${store.slotSize(slot)} held`)
     for (const hold of holds) {
       const watch = store.get(hold.watchID)
-      console.log(`  held   ${hold.watchID} (${watch?.name ?? "?"}) by ${hold.sessionID} since ${relative(hold.acquiredAt, now)}, until ${formatTime(hold.expiresAt)}`)
+      console.log(`  held   ${hold.watchID} (${watch?.name ?? "?"}) by ${displayTarget(hold.sessionID)} since ${relative(hold.acquiredAt, now)}, until ${formatTime(hold.expiresAt)}`)
     }
     for (const watch of waiting.filter((other) => other.slot === slot).sort((a, b) => a.createdAt - b.createdAt))
-      console.log(`  queued ${watch.id} (${watch.name}) for ${watch.sessionID}: ${clip(watch.lastValue ?? "not checked yet", 80)}`)
+      console.log(`  queued ${watch.id} (${watch.name}) for ${displayTarget(watch.sessionID)}: ${clip(watch.lastValue ?? "not checked yet", 80)}`)
   }
 }
 
@@ -573,7 +573,7 @@ function row(watch: Watch, now: number) {
         ? "delivering"
         : `${watch.status} ${relative(watch.endedAt ?? watch.firedAt ?? watch.createdAt, now)}`
   const value = watch.kind === "poll" ? clip(watch.lastValue ?? "–", 40) : ""
-  return [watch.id, watch.name, watch.sessionID, next, value]
+  return [watch.id, watch.name, displayTarget(watch.sessionID), next, value]
 }
 
 function list() {
@@ -595,7 +595,7 @@ function show(watch: Watch) {
   const lines: [string, string | undefined][] = [
     ["Watch", `${watch.id} (${watch.name})`],
     ["Status", watch.status + (watch.outcome ? `, ${watch.outcome}` : "")],
-    ["Session", watch.noDeliver ? `${watch.sessionID} (foreground wait; no prompt)` : watch.sessionID],
+    ["Session", watch.noDeliver ? `${watch.sessionID} (foreground wait; no prompt)` : displayTarget(watch.sessionID)],
     ["Created", at(watch.createdAt)],
     ["Created by", watch.createdBy ?? (watch.ownerPID ? `pid ${watch.ownerPID}` : undefined)],
     ["Instruction", watch.instruction],

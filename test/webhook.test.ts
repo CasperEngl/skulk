@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test"
-import { deliverViaWebhook, isWebhook } from "../src/webhook.ts"
+import { deliverViaWebhook, displayTarget, isWebhook } from "../src/webhook.ts"
 
 let status = 200
 const received: unknown[] = []
@@ -18,6 +18,11 @@ test("only https URLs are webhooks", () => {
   expect(isWebhook("https://relay.example/hooks/abc")).toBe(true)
   expect(isWebhook("http://relay.example/hooks/abc")).toBe(false)
   expect(isWebhook("ses_abc123")).toBe(false)
+})
+
+test("output shows a webhook's origin, never its path", () => {
+  expect(displayTarget("https://relay.example/hooks/abc/SECRET")).toBe("https://relay.example/…")
+  expect(displayTarget("ses_abc123")).toBe("ses_abc123")
 })
 
 test("posts the wake as JSON", async () => {
