@@ -85,7 +85,8 @@ Manage
   skulk daemon                     run the supervisor (launchd runs this)
   skulk launchd [--label L]        print the LaunchAgent plist (honours $SKULK_HOME)
 
-The target session defaults to $OPENCODE_SESSION_ID (the calling OpenCode session). Limits: polls at
+The target session defaults to $OPENCODE_SESSION_ID (the calling OpenCode session), then $SKULK_WEBHOOK.
+--session also takes an https:// webhook URL, which receives the wake as a JSON POST. Limits: polls at
 most every 60s (15s default for event built-ins), ${Limits.maxActive} open watches, deadlines up to 14 days. State
 and logs live in ${"$"}SKULK_HOME (default ~/.local/state/skulk), owner-only. SKULK_* variables also accept
 their pre-rename WAKE_* names.`
