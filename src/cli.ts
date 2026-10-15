@@ -10,6 +10,7 @@ import { daemonPID, nudge, runDaemon } from "./daemon.ts"
 import { env } from "./env.ts"
 import { fileLogger, logPath } from "./engine.ts"
 import { legacyStateDirectory, Store } from "./store.ts"
+import { isWebhook } from "./webhook.ts"
 import { allowExec, builtinDeps, capacityCommand, defaultPath, launchdLabel, probeCapacity, runWatch, sessionExists, watchID } from "./system.ts"
 import { clip, formatDuration, formatTime, parseDuration, parseTime, redact, relative } from "./text.ts"
 import { describeCondition, isEventBuiltin, isOpen, Limits, type Builtin, type Condition, type Watch } from "./watch.ts"
@@ -179,9 +180,9 @@ function daemonWarning() {
 const noDeliver = () => Boolean(flags.wait && !flags.do)
 
 async function targetSession() {
-  const sessionID = flags.session ?? process.env.OPENCODE_SESSION_ID ?? (noDeliver() ? "ses_localwait" : undefined)
-  if (!sessionID) fail("no target session: pass --session ses_… (or run inside OpenCode, or pass --wait)")
-  if (noDeliver()) return { sessionID, title: undefined }
+  const sessionID = flags.session ?? process.env.OPENCODE_SESSION_ID ?? env("WEBHOOK") ?? (noDeliver() ? "ses_localwait" : undefined)
+  if (!sessionID) fail("no target session: pass --session ses_… or an https:// webhook (or set $SKULK_WEBHOOK, or pass --wait)")
+  if (noDeliver() || isWebhook(sessionID)) return { sessionID, title: undefined }
   const found = await sessionExists(sessionID).catch((error: Error) => fail(error.message))
   if (!found.exists) fail(`session ${sessionID} does not exist`)
   return { sessionID, title: found.title }
